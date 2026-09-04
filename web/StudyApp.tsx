@@ -726,17 +726,30 @@ const StudyApp: React.FC = () => {
                 }
             } catch {}
             if (!cacheHit) {
-                // 全书分块拉取：小书1块、大书多块（避免单次大响应内存峰值，也修掉9999段截断）；批注随块增量合并
+                // 全书分块拉取：小书1块、大书多块（避免单次大响应内存峰值，也修掉9999段截断）；批注随块增量合并。
+                // 各块之间没有依赖，起点从 totalParas 提前算好，并发拉（限流避免一次性打爆连接数），
+                // 比逐块 await 快了一个并发倍数——大书原来要1-2分钟，这一步是主要瓶颈之一。
                 const rawParas: Paragraph[] = [];
                 const fetchedComments: Comment[] = [];
                 const seenCommentIds = new Set<number>();
-                for (let start = 0; start < totalParas; start += PARA_FETCH_CHUNK) {
-                    const d = await api.fetchBookSlice(book.id, start, PARA_FETCH_CHUNK);
+                const chunkStarts: number[] = [];
+                for (let start = 0; start < totalParas; start += PARA_FETCH_CHUNK) chunkStarts.push(start);
+                const chunkResults: any[] = new Array(chunkStarts.length);
+                const CHUNK_CONCURRENCY = 4;
+                let nextChunk = 0;
+                const fetchWorker = async () => {
+                    while (nextChunk < chunkStarts.length) {
+                        const i = nextChunk++;
+                        chunkResults[i] = await api.fetchBookSlice(book.id, chunkStarts[i], PARA_FETCH_CHUNK);
+                    }
+                };
+                await Promise.all(Array.from({ length: Math.min(CHUNK_CONCURRENCY, chunkStarts.length) }, fetchWorker));
+                for (const d of chunkResults) {
+                    if (!d) continue;
                     rawParas.push(...(d.paragraphs || []));
                     for (const cmt of (d.comments || []) as Comment[]) {
                         if (!seenCommentIds.has(cmt.id)) { seenCommentIds.add(cmt.id); fetchedComments.push(cmt); }
                     }
-                    if ((d.paragraphs || []).length < PARA_FETCH_CHUNK) break;
                 }
                 const isEpubJunk = (s: string) => /^(1UR057|Cover|封面|插图|导航|书名页|制作信息|Contents|[A-Z0-9]{3,10}(-\d+)?)$/.test(s.trim());
                 const allP: Paragraph[] = rawParas.filter((p: Paragraph) => !isEpubJunk(p.content));
@@ -1460,6 +1473,23 @@ const StudyApp: React.FC = () => {
         Promise.resolve(pending).finally(() => loadBooks());
     };
 
+    // Morrow 外层有自己的 Page 头部返回箭头，不知道这里还分书架/阅读两层——
+    // 把当前层级汇报给它，它才能在阅读中先退回书架，而不是直接把整个页面关掉。
+    useEffect(() => {
+        if (window.parent !== window) {
+            window.parent.postMessage({ type: 'morrow-coread-mode', mode }, '*');
+        }
+    }, [mode]);
+    useEffect(() => {
+        if (window.parent === window) return;
+        const onParentMessage = (e: MessageEvent) => {
+            if (e.source !== window.parent) return;
+            if (e.data?.type === 'morrow-coread-back' && mode === 'reading') backToShelf();
+        };
+        window.addEventListener('message', onParentMessage);
+        return () => window.removeEventListener('message', onParentMessage);
+    }, [mode]);
+
     const requestClose = () => {
         if (window.parent !== window) {
             window.parent.postMessage({ type: 'morrow-coread-close' }, '*');
@@ -1634,7 +1664,7 @@ const StudyApp: React.FC = () => {
                     <button onClick={requestClose} style={btnBase}>
                         <span style={{ fontSize: 18, color: c.primary }}>‹</span>
                     </button>
-                    <span style={{ fontSize: 16, fontWeight: 700, color: c.primaryDark, flex: 1 }}>共读室</span>
+                    <span style={{ fontSize: 16, fontWeight: 700, color: c.primaryDark, flex: 1 }}>Palimpsest</span>
                     {editMode && selectedBooks.size > 0 && (
                         <button onClick={async () => {
                             if (!confirm(`删除选中的 ${selectedBooks.size} 本书？`)) return;
