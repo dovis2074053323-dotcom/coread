@@ -384,6 +384,8 @@ const StudyApp: React.FC = () => {
     const [showSettings, setShowSettings] = useState(false);
     const [readerFontSize, setReaderFontSize] = useState(() => parseInt(localStorage.getItem('coread-font-size') || '14', 10));
     const [showFontPanel, setShowFontPanel] = useState(false);
+    const [showBookmarkMenu, setShowBookmarkMenu] = useState(false);
+    const [showMoreMenu, setShowMoreMenu] = useState(false);
     const [readerBrightness, setReaderBrightness] = useState(() => parseInt(localStorage.getItem('coread-brightness') || '100', 10));
     const [readerNightMode, setReaderNightMode] = useState(() => localStorage.getItem('coread-night-mode') === 'true');
     const displayName = (from: string) => {
@@ -1320,9 +1322,15 @@ const StudyApp: React.FC = () => {
         setPage(targetPage >= 0 ? targetPage + 1 : Math.max(1, Math.min(totalPages, bookmark.page)));
     };
 
-    const handleExport = () => {
+    // 三个底栏弹层（书签菜单 / 字体面板 / 更多菜单）互斥，开一个收另外两个
+    const toggleBookmarkMenu = () => { setShowBookmarkMenu(v => !v); setShowMoreMenu(false); setShowFontPanel(false); };
+    const toggleFontPanel = () => { setShowFontPanel(v => !v); setShowBookmarkMenu(false); setShowMoreMenu(false); };
+    const toggleMoreMenu = () => { setShowMoreMenu(v => !v); setShowBookmarkMenu(false); setShowFontPanel(false); };
+
+    const handleExport = (format: 'epub' | 'md') => {
         if (!activeBook) return;
-        window.open(coreadPath(`/v1/books/${activeBook.id}/export?format=epub`), '_blank');
+        setShowMoreMenu(false);
+        window.open(coreadPath(`/v1/books/${activeBook.id}/export?format=${format}`), '_blank');
     };
 
     const jumpToChapter = (chapter: { idx: number; page: number; title: string }) => {
@@ -2059,36 +2067,32 @@ const StudyApp: React.FC = () => {
                             <button onClick={() => goPage(1)} disabled={page >= totalPages}
                                 style={{ background: 'none', border: 'none', fontSize: 18, color: page < totalPages ? c.primary : '#ddd', cursor: 'pointer', padding: '2px 4px' }}>›</button>
                         </div>
-                        {/* Bottom row: center page info, right function buttons */}
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
-                            <span style={{ fontSize: 12, color: '#aaa' }}>{page} / {totalPages}</span>
-                            <div style={{ position: 'absolute', right: 0, display: 'flex', gap: 12 }}>
-                                <button onClick={saveBookmark} aria-label={bookmark ? '更新书签' : '保存书签'}
-                                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-                                    <span style={{ fontSize: 15, lineHeight: 1, color: bookmark ? c.primary : '#666' }}>{bookmark ? '★' : '☆'}</span>
-                                    <span style={{ fontSize: 9, color: bookmark ? c.primary : '#aaa' }}>书签</span>
-                                </button>
-                                <button onClick={jumpToBookmark} disabled={!bookmark} aria-label="回到书签"
-                                    style={{ background: 'none', border: 'none', cursor: bookmark ? 'pointer' : 'default', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, opacity: bookmark ? 1 : 0.45 }}>
-                                    <span style={{ fontSize: 14, lineHeight: 1, color: '#666' }}>↩</span>
-                                    <span style={{ fontSize: 9, color: '#aaa' }}>回书签</span>
-                                </button>
-                                <button onClick={() => setShowFontPanel(v => !v)}
-                                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-                                    <span style={{ fontSize: 14, lineHeight: 1, color: showFontPanel ? c.primary : '#666', fontWeight: 700, fontFamily: 'serif' }}>Aa</span>
-                                    <span style={{ fontSize: 9, color: showFontPanel ? c.primary : '#aaa' }}>字体</span>
-                                </button>
-                                <button onClick={() => setShowToc(true)}
-                                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-                                    <span style={{ fontSize: 15, lineHeight: 1, color: '#666' }}>☰</span>
-                                    <span style={{ fontSize: 9, color: '#aaa' }}>目录</span>
-                                </button>
-                                <button onClick={handleExport}
-                                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-                                    <span style={{ fontSize: 13, lineHeight: 1, color: '#666' }}>↓</span>
-                                    <span style={{ fontSize: 9, color: '#aaa' }}>导出</span>
-                                </button>
+                        {/* Bottom row: 页码 ｜ 书签 ｜ Aa ｜ 目录 ｜ ··· — 五项等宽分布，手机宽度不挤 */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, padding: '2px 6px' }}>
+                                <span style={{ fontSize: 12, lineHeight: 1, color: '#aaa' }}>{page}/{totalPages}</span>
+                                <span style={{ fontSize: 9, color: '#aaa' }}>页码</span>
                             </div>
+                            <button onClick={toggleBookmarkMenu} aria-label="书签"
+                                style={{ flex: 1, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                                <span style={{ fontSize: 15, lineHeight: 1, color: (bookmark || showBookmarkMenu) ? c.primary : '#666' }}>{bookmark ? '★' : '☆'}</span>
+                                <span style={{ fontSize: 9, color: (bookmark || showBookmarkMenu) ? c.primary : '#aaa' }}>书签</span>
+                            </button>
+                            <button onClick={toggleFontPanel} aria-label="字体与显示设置"
+                                style={{ flex: 1, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                                <span style={{ fontSize: 14, lineHeight: 1, color: showFontPanel ? c.primary : '#666', fontWeight: 700, fontFamily: 'serif' }}>Aa</span>
+                                <span style={{ fontSize: 9, color: showFontPanel ? c.primary : '#aaa' }}>字体</span>
+                            </button>
+                            <button onClick={() => setShowToc(true)} aria-label="目录"
+                                style={{ flex: 1, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                                <span style={{ fontSize: 15, lineHeight: 1, color: '#666' }}>☰</span>
+                                <span style={{ fontSize: 9, color: '#aaa' }}>目录</span>
+                            </button>
+                            <button onClick={toggleMoreMenu} aria-label="更多操作"
+                                style={{ flex: 1, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                                <span style={{ fontSize: 15, lineHeight: 1, color: showMoreMenu ? c.primary : '#666' }}>···</span>
+                                <span style={{ fontSize: 9, color: showMoreMenu ? c.primary : '#aaa' }}>更多</span>
+                            </button>
                         </div>
                     </div>
 
@@ -2171,6 +2175,57 @@ const StudyApp: React.FC = () => {
                                 </div>
                             )}
                         </div>
+                    </div>
+
+                    {/* 书签菜单 — 保存/更新到当前位置、回到书签，替代原来常驻的「回书签」按钮 */}
+                    <div onClick={(e) => e.stopPropagation()} style={{
+                        position: 'absolute', bottom: showBar ? 90 : -300, right: 16, zIndex: 20, minWidth: 190,
+                        background: readerNightMode ? '#2b2924' : '#fff',
+                        borderRadius: 14, padding: 6,
+                        boxShadow: '0 -2px 24px rgba(0,0,0,0.10)', border: `1px solid ${c.primaryBorder}`,
+                        opacity: showBookmarkMenu && showBar ? 1 : 0,
+                        transform: showBookmarkMenu && showBar ? 'translateY(0)' : 'translateY(20px)',
+                        transition: 'opacity 0.25s ease, transform 0.25s ease, bottom 0.3s ease',
+                        pointerEvents: showBookmarkMenu && showBar ? 'auto' : 'none',
+                    }}>
+                        <button onClick={() => { saveBookmark(); setShowBookmarkMenu(false); }}
+                            style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer',
+                                padding: '10px 12px', borderRadius: 10, fontSize: 13,
+                                color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>
+                            {bookmark ? '更新到当前位置' : '保存到当前位置'}
+                        </button>
+                        <button onClick={() => { jumpToBookmark(); setShowBookmarkMenu(false); }} disabled={!bookmark}
+                            style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none',
+                                cursor: bookmark ? 'pointer' : 'default', padding: '10px 12px', borderRadius: 10, fontSize: 13,
+                                color: bookmark ? (readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT) : '#999', opacity: bookmark ? 1 : 0.5 }}>
+                            {bookmark ? `回到书签 · p.${bookmark.page}` : '回到书签'}
+                        </button>
+                    </div>
+
+                    {/* 更多操作菜单 — 目前只有导出，低频操作放这里，不再常驻底栏 */}
+                    <div onClick={(e) => e.stopPropagation()} style={{
+                        position: 'absolute', bottom: showBar ? 90 : -300, right: 16, zIndex: 20, minWidth: 150,
+                        background: readerNightMode ? '#2b2924' : '#fff',
+                        borderRadius: 14, padding: 6,
+                        boxShadow: '0 -2px 24px rgba(0,0,0,0.10)', border: `1px solid ${c.primaryBorder}`,
+                        opacity: showMoreMenu && showBar ? 1 : 0,
+                        transform: showMoreMenu && showBar ? 'translateY(0)' : 'translateY(20px)',
+                        transition: 'opacity 0.25s ease, transform 0.25s ease, bottom 0.3s ease',
+                        pointerEvents: showMoreMenu && showBar ? 'auto' : 'none',
+                    }}>
+                        <div style={{ fontSize: 10, color: c.muted, padding: '4px 12px 6px', letterSpacing: 0.3 }}>导出</div>
+                        <button onClick={() => handleExport('epub')}
+                            style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer',
+                                padding: '10px 12px', borderRadius: 10, fontSize: 13,
+                                color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>
+                            EPUB
+                        </button>
+                        <button onClick={() => handleExport('md')}
+                            style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer',
+                                padding: '10px 12px', borderRadius: 10, fontSize: 13,
+                                color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>
+                            Markdown
+                        </button>
                     </div>
                 </>
             )}
