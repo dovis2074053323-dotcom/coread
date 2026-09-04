@@ -11,6 +11,8 @@
     "start": "node server.mjs",
     "dev": "npx vite",
     "build": "npx vite build",
+    "lint": "tsc --noEmit -p web/tsconfig.json",
+    "test": "node --test test/*.test.mjs",
     "mcp": "node mcp-stdio.mjs",
     "mcp:sse": "node mcp-sse.mjs"
   },

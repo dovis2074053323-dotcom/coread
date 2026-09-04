@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useRef, startTransition, useLayoutEffect, useMemo } from 'react';
-import { api } from './api';
+import { api, coreadPath } from './api';
 
 function themeColors(h: number, s: number, l: number) {
     const primary = `hsl(${h}, ${s}%, ${l}%)`;
@@ -22,9 +22,24 @@ function themeColors(h: number, s: number, l: number) {
     return { primary, primaryLight, primaryBg, primaryBorder, primaryDark, warmAccent, warmBg, grad1, grad2, grad3, shenColor, shenBg, tongColor, tongBg, shenHL, tongHL };
 }
 
-interface Book { id: number; title: string; total_paragraphs: number; created_at: string; current_page: number | null; comment_count: number; }
+interface Book {
+    id: number;
+    title: string;
+    total_paragraphs: number;
+    created_at: string;
+    cover_image?: string | null;
+    current_page: number | null;
+    last_read_at?: string | null;
+    current_offset?: number | null;
+    bookmark_page?: number | null;
+    bookmark_paragraph_idx?: number | null;
+    bookmark_offset?: number | null;
+    bookmark_updated_at?: string | null;
+    comment_count: number;
+}
 interface Paragraph { idx: number; content: string; }
 interface Comment { id: number; book_id: number; paragraph_idx: number; sel_end_para_idx: number | null; sel_start_idx: number | null; sel_end_idx: number | null; selected_text: string | null; from_who: string; content: string; created_at: string; reply_to: number | null; }
+interface Bookmark { page: number; paragraph_idx: number; char_offset: number; created_at?: string | null; updated_at?: string | null; }
 interface PageBreak { paraIndex: number; offset: number; }
 interface PageFragment extends Paragraph { sourceIdx: number; startOffset: number; endOffset: number; isPartialStart: boolean; isPartialEnd: boolean; }
 interface ReplyNotice {
@@ -95,6 +110,17 @@ const MEASURE_CHUNK = 1500;
 const TOC_ROW_H = 44;
 // 后手优化：缓存miss时先分当前位置±PROVISIONAL_WIN段立即可读，全书分页后台补全
 const PROVISIONAL_WIN = 2500;
+
+function pageBreakIndexForAnchor(breaks: PageBreak[], paraIndex: number, charOffset = 0): number {
+    if (paraIndex < 0 || breaks.length === 0) return 0;
+    let answer = 0;
+    for (let i = 0; i < breaks.length; i++) {
+        const br = breaks[i];
+        if (br.paraIndex < paraIndex || (br.paraIndex === paraIndex && br.offset <= charOffset)) answer = i;
+        else if (br.paraIndex > paraIndex) break;
+    }
+    return answer;
+}
 
 // 分页/段落缓存主存 IndexedDB：大书分页结果几百KB起，localStorage(5-10MB)写不下
 // 或被清理→每次重开都重分页。localStorage 只作 IDB 不可用时的后手兜底。
@@ -201,10 +227,16 @@ const StudyApp: React.FC = () => {
     const measureRef = useRef<HTMLDivElement>(null);
     const [allParas, setAllParas] = useState<Paragraph[]>([]);
     const [allComments, setAllComments] = useState<Comment[]>([]);
+    const [bookmark, setBookmark] = useState<Bookmark | null>(null);
     const [pageHeight, setPageHeight] = useState(0);
     const [readerSize, setReaderSize] = useState({ width: 0, height: 0 });
     const savedParaIdxRef = useRef<number | null>(null);
+    const savedCharOffsetRef = useRef(0);
     const currentParaIdxRef = useRef<number | null>(null);
+    const currentPositionRef = useRef<{ page: number; paragraphIdx: number | null; charOffset: number }>({ page: 1, paragraphIdx: null, charOffset: 0 });
+    const progressWriteTailRef = useRef<Promise<unknown>>(Promise.resolve());
+    const restoringProgressRef = useRef(false);
+    const openGenerationRef = useRef(0);
     // 后手优化：临时页表覆盖的段落区间（非null=全书分页仍在后台补全，窗外跳转先拦住）
     const provisionalRangeRef = useRef<{ from: number; to: number } | null>(null);
 
@@ -281,9 +313,7 @@ const StudyApp: React.FC = () => {
         if (mode !== 'reading' || !activeBook) return;
         const interval = setInterval(async () => {
             try {
-                const vh = window.innerHeight || 700;
-                const pp = Math.max(12, Math.min(28, Math.floor((vh - 120) / 26)));
-                const d = await api.fetchBookDetail(activeBook.id, page, pp);
+                const d = await api.fetchBookDetail(activeBook.id, page);
                 if (d.comments) {
                     const newIds = d.comments.map((c: any) => c.id).join(',');
                     if (newIds !== lastCommentIds.current) {
@@ -308,13 +338,45 @@ const StudyApp: React.FC = () => {
         return () => clearInterval(interval);
     }, [mode, activeBook?.id, page]);
 
+    const persistProgressPosition = (bookId: number, position: { page: number; paragraphIdx: number | null; charOffset: number }, keepalive = false) => {
+        if (position.paragraphIdx === null || !Number.isSafeInteger(position.paragraphIdx)) return Promise.resolve();
+        if (keepalive) {
+            return api.updateBookProgress(bookId, position.paragraphIdx, position.charOffset, { keepalive: true }).catch(() => {});
+        }
+        const next = progressWriteTailRef.current
+            .catch(() => {})
+            .then(() => api.updateBookProgress(bookId, position.paragraphIdx!, position.charOffset));
+        progressWriteTailRef.current = next.catch(() => {});
+        return next;
+    };
+
+    const persistCurrentPosition = (keepalive = false) => {
+        if (!activeBook) return Promise.resolve();
+        return persistProgressPosition(activeBook.id, currentReaderPosition(), keepalive);
+    };
+
+    // The normal page effect persists on every page change. These lifecycle
+    // hooks cover leaving the reader without another React render (refresh,
+    // app switch, or Android WebView suspension).
+    useEffect(() => {
+        if (mode !== 'reading' || !activeBook) return undefined;
+        const flush = () => { persistProgressPosition(activeBook.id, currentPositionRef.current, true); };
+        const onVisibilityChange = () => { if (document.visibilityState === 'hidden') flush(); };
+        window.addEventListener('pagehide', flush);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.removeEventListener('pagehide', flush);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, [mode, activeBook?.id]);
+
     // Poll for new replies from 沉
     useEffect(() => {
         if (mode !== 'reading' || !activeBook) return;
         const check = async () => {
             try {
                 const lastSeen = parseInt(localStorage.getItem(`book-${activeBook.id}-last-seen`) || '0');
-                const r = await fetch(`/v1/books/${activeBook.id}/new-replies?since=${lastSeen}`);
+                const r = await fetch(coreadPath(`/v1/books/${activeBook.id}/new-replies?since=${lastSeen}`));
                 if (r.ok) {
                     const d = await r.json();
                     const aiOnly = (d.replies || []).filter((r: any) => r.from_who.toLowerCase() !== humanName.toLowerCase());
@@ -477,12 +539,26 @@ const StudyApp: React.FC = () => {
     };
 
     const openBook = async (book: Book) => {
+        const generation = ++openGenerationRef.current;
         setActiveBook(book); setMode('reading');
         setReadingLoading(true);
         setPage(1); setTotalPages(1); setPageBreaks([{ paraIndex: 0, offset: 0 }]); setPageFragments([]); setPaginateProgress(null);
         setParagraphs([]); setComments([]); setAllParas([]); setAllComments([]);
+        setBookmark(book.bookmark_page != null && book.bookmark_paragraph_idx != null ? {
+            page: book.bookmark_page,
+            paragraph_idx: book.bookmark_paragraph_idx,
+            char_offset: book.bookmark_offset || 0,
+            updated_at: book.bookmark_updated_at,
+        } : null);
         currentParaIdxRef.current = null;
+        currentPositionRef.current = { page: 1, paragraphIdx: null, charOffset: 0 };
         provisionalRangeRef.current = null;
+        restoringProgressRef.current = true;
+        savedParaIdxRef.current = Number.isSafeInteger(Number(book.current_page)) ? Number(book.current_page) : null;
+        savedCharOffsetRef.current = Number.isSafeInteger(Number(book.current_offset)) ? Number(book.current_offset) : 0;
+        api.fetchBookBookmark(book.id).then((d: any) => {
+            if (openGenerationRef.current === generation) setBookmark(d.bookmark || null);
+        }).catch(() => {});
         {
             const bookTitle = book.title?.replace(/\s*\(.*?\)\s*/g, '').trim();
             fetch('/v1/reading-wishlist').then(r => r.json()).then(res => {
@@ -511,8 +587,16 @@ const StudyApp: React.FC = () => {
                         const comments = cachedComments ? JSON.parse(cachedComments) : [];
                         setAllComments(comments);
                         setComments(comments);
-                        savedParaIdxRef.current = book.current_page || 0;
                         cacheHit = true;
+                        api.fetchBookDetail(book.id, 1).then((d: any) => {
+                            if (openGenerationRef.current !== generation) return;
+                            if (Array.isArray(d.comments)) {
+                                setAllComments(d.comments);
+                                setComments(d.comments);
+                                idbSetParas(commentCacheKey, JSON.stringify(d.comments)).catch(() => {});
+                            }
+                            if (d.bookmark) setBookmark(d.bookmark);
+                        }).catch(() => {});
                     }
                 }
             } catch {}
@@ -544,9 +628,11 @@ const StudyApp: React.FC = () => {
                 setAllParas(filtered);
                 setAllComments(fetchedComments);
                 setComments(fetchedComments);
-                savedParaIdxRef.current = book.current_page || 0;
                 // 有内容时loading由分页effect跳页完成后关闭——这里提前关会先露出第1页再跳（闪烁）
-                if (filtered.length === 0) setReadingLoading(false);
+                if (filtered.length === 0) {
+                    restoringProgressRef.current = false;
+                    setReadingLoading(false);
+                }
                 idbSetParas(paraCacheKey, JSON.stringify({ paragraphs: filtered, totalParas })).catch(() => {});
                 idbSetParas(commentCacheKey, JSON.stringify(fetchedComments)).catch(() => {});
             }
@@ -679,6 +765,7 @@ const StudyApp: React.FC = () => {
             // 后手优化判定——缓存miss且锚点够靠后时，先快速分当前位置±PROVISIONAL_WIN段的临时页
             // 立即可读，全书分页随后照常从0跑完后替换
             const anchorIdx0 = savedParaIdxRef.current ?? currentParaIdxRef.current ?? allParas[0]?.idx ?? 0;
+            const anchorOffset0 = savedParaIdxRef.current !== null ? savedCharOffsetRef.current : currentPositionRef.current.charOffset;
             const anchorPi0 = allParas.findIndex(p => p.idx >= anchorIdx0);
             const useProvisional = progressive && !suppressPageJumpRef.current && anchorPi0 > PROVISIONAL_WIN;
 
@@ -703,11 +790,13 @@ const StudyApp: React.FC = () => {
                             if (!suppressPageJumpRef.current) {
                                 const anchorIdx = savedParaIdxRef.current ?? currentParaIdxRef.current ?? allParas[0]?.idx ?? 0;
                                 const pi = allParas.findIndex(p => p.idx >= anchorIdx);
-                                let targetPage = 0;
-                                if (pi >= 0) { for (let i = cachedBreaks.length - 1; i >= 0; i--) if (cachedBreaks[i].paraIndex <= pi) { targetPage = i; break; } }
+                                const anchorOffset = savedParaIdxRef.current !== null ? savedCharOffsetRef.current : currentPositionRef.current.charOffset;
+                                const targetPage = pageBreakIndexForAnchor(cachedBreaks, pi, anchorOffset);
                                 setPage(Math.max(1, Math.min(cachedBreaks.length, targetPage + 1)));
                             }
                             savedParaIdxRef.current = null;
+                            savedCharOffsetRef.current = 0;
+                            restoringProgressRef.current = false;
                             setReadingLoading(false);
                             return;
                         }
@@ -840,10 +929,11 @@ const StudyApp: React.FC = () => {
                     provisionalRangeRef.current = { from: wFrom, to: wTo };
                     setPageBreaks(wb);
                     setTotalPages(Math.max(1, wb.length));
-                    let tp = 0;
-                    for (let k = wb.length - 1; k >= 0; k--) { if (wb[k].paraIndex <= anchorPi0) { tp = k; break; } }
+                    const tp = pageBreakIndexForAnchor(wb, anchorPi0, anchorOffset0);
                     setPage(tp + 1);
                     savedParaIdxRef.current = null; // 锚点已用掉，全书分页完成时按实时阅读位置重映射
+                    savedCharOffsetRef.current = 0;
+                    restoringProgressRef.current = false;
                     setReadingLoading(false); // 立即可读；全书分页下面照常跑
                 }
             }
@@ -936,15 +1026,14 @@ const StudyApp: React.FC = () => {
             }
             if (!suppressPageJumpRef.current) {
                 const anchorIdx = savedParaIdxRef.current ?? currentParaIdxRef.current ?? allParas[0]?.idx ?? 0;
-                const targetPage = (() => {
-                    const pi = allParas.findIndex(p => p.idx >= anchorIdx);
-                    if (pi < 0) return 0;
-                    for (let i = breaks.length - 1; i >= 0; i--) if (breaks[i].paraIndex <= pi) return i;
-                    return 0;
-                })();
+                const pi = allParas.findIndex(p => p.idx >= anchorIdx);
+                const anchorOffset = savedParaIdxRef.current !== null ? savedCharOffsetRef.current : currentPositionRef.current.charOffset;
+                const targetPage = pageBreakIndexForAnchor(breaks, pi, anchorOffset);
                 setPage(Math.max(1, Math.min(breaks.length, targetPage + 1)));
             }
             savedParaIdxRef.current = null;
+            savedCharOffsetRef.current = 0;
+            restoringProgressRef.current = false;
             setPaginateProgress(null);
             setReadingLoading(false);
             if (provisionalShown) toast('全书分页已完成');
@@ -982,8 +1071,15 @@ const StudyApp: React.FC = () => {
         setParagraphs(visibleParas);
         setComments(allComments);
         currentParaIdxRef.current = visibleParas[0]?.idx ?? null;
-        if (activeBook && visibleParas.length > 0) {
-            api.updateBookProgress(activeBook.id, visibleParas[0].idx).catch(() => {});
+        const firstFragment = fragments[0];
+        const charOffset = firstFragment && firstFragment.sourceIdx === start.paraIndex ? firstFragment.startOffset : 0;
+        currentPositionRef.current = {
+            page,
+            paragraphIdx: visibleParas[0]?.idx ?? null,
+            charOffset,
+        };
+        if (activeBook && visibleParas.length > 0 && !restoringProgressRef.current) {
+            persistProgressPosition(activeBook.id, currentPositionRef.current);
         }
     }, [page, pageBreaks, allParas, allComments, activeBook?.id]);
 
@@ -1043,6 +1139,7 @@ const StudyApp: React.FC = () => {
             setActiveComments([]); setCommentingIdx(null);
             setComments(prev => [...prev, newComment]);
             setAllComments(prev => [...prev, newComment]);
+            idbSetParas(`comments-v1-${activeBook.id}`, JSON.stringify([...allComments, newComment])).catch(() => {});
             setPage(pageToRestore);
             setTimeout(() => { suppressPageJumpRef.current = false; }, 500);
         } catch (e: any) { toast(`批注失败: ${e.message}`); }
@@ -1054,12 +1151,49 @@ const StudyApp: React.FC = () => {
             setComments(prev => prev.filter(x => x.id !== cmt.id));
             setAllComments(prev => prev.filter(x => x.id !== cmt.id));
             setActiveComments(prev => prev.filter(x => x.id !== cmt.id));
+            idbSetParas(`comments-v1-${activeBook.id}`, JSON.stringify(allComments.filter(x => x.id !== cmt.id))).catch(() => {});
         } catch (e: any) { toast(`删除失败: ${e.message}`); }
+    };
+
+    const currentReaderPosition = () => {
+        const start = pageBreaks[page - 1] || { paraIndex: 0, offset: 0 };
+        const derived = {
+            page,
+            paragraphIdx: allParas[start.paraIndex]?.idx ?? null,
+            charOffset: start.offset,
+        };
+        return derived.paragraphIdx === null ? currentPositionRef.current : derived;
+    };
+
+    const saveBookmark = async () => {
+        if (!activeBook) return;
+        const position = currentReaderPosition();
+        if (position.paragraphIdx === null) { toast('当前还没有可保存的阅读位置'); return; }
+        try {
+            const result = await api.updateBookBookmark(activeBook.id, {
+                page: position.page,
+                paragraph_idx: position.paragraphIdx,
+                char_offset: position.charOffset,
+            });
+            setBookmark(result.bookmark || null);
+            toast('书签已保存');
+        } catch (e: any) { toast(`书签保存失败: ${e.message}`); }
+    };
+
+    const jumpToBookmark = () => {
+        if (!bookmark) return;
+        if (!canJumpToPara(bookmark.paragraph_idx)) return;
+        const targetPage = findPageForParaIdx(bookmark.paragraph_idx, totalPages, bookmark.char_offset);
+        setActiveComments([]);
+        setCommentingIdx(null);
+        setSelRange(null);
+        setFloatingBar(null);
+        setPage(targetPage >= 0 ? targetPage + 1 : Math.max(1, Math.min(totalPages, bookmark.page)));
     };
 
     const handleExport = () => {
         if (!activeBook) return;
-        window.open(`/v1/books/${activeBook.id}/export?format=epub`, '_blank');
+        window.open(coreadPath(`/v1/books/${activeBook.id}/export?format=epub`), '_blank');
     };
 
     const handleDeleteBook = async (bookId: number) => {
@@ -1190,10 +1324,19 @@ const StudyApp: React.FC = () => {
     };
 
     const backToShelf = () => {
+        const pending = persistCurrentPosition();
         setMode('shelf'); setActiveBook(null); setParagraphs([]); setComments([]);
         setActiveComments([]); setSelRange(null); setFloatingBar(null); setShowToc(false); setTocChapters([]);
-        setReturnPoint(null);
-        loadBooks();
+        setBookmark(null); setReturnPoint(null);
+        Promise.resolve(pending).finally(() => loadBooks());
+    };
+
+    const requestClose = () => {
+        if (window.parent !== window) {
+            window.parent.postMessage({ type: 'morrow-coread-close' }, '*');
+            return;
+        }
+        window.history.back();
     };
 
     const commentsForPara = (idx: number) => comments.filter(x => {
@@ -1291,7 +1434,7 @@ const StudyApp: React.FC = () => {
             {/* Header — shelf always shows; reading mode header slides with toolbar */}
             {mode === 'shelf' ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 'calc(52px + env(safe-area-inset-top))', paddingLeft: 20, paddingRight: 20, paddingBottom: 12, flexShrink: 0 }}>
-                    <button onClick={() => window.history.back()} style={btnBase}>
+                    <button onClick={requestClose} style={btnBase}>
                         <span style={{ fontSize: 18, color: c.primary }}>‹</span>
                     </button>
                     <span style={{ fontSize: 16, fontWeight: 700, color: c.primaryDark, flex: 1 }}>共读室</span>
@@ -1299,7 +1442,7 @@ const StudyApp: React.FC = () => {
                         <button onClick={async () => {
                             if (!confirm(`删除选中的 ${selectedBooks.size} 本书？`)) return;
                             for (const id of selectedBooks) {
-                                try { await fetch(`/v1/books/${id}`, { method: 'DELETE' }); } catch {}
+                                try { await api.deleteBook(id); } catch {}
                             }
                             setSelectedBooks(new Set()); setEditMode(false); loadBooks();
                             toast(`已删除 ${selectedBooks.size} 本`);
@@ -1386,8 +1529,8 @@ const StudyApp: React.FC = () => {
                                     if (aTime || bTime) { if (aTime !== bTime) return bTime - aTime; }
                                     return b.id - a.id;
                                 }).map((book, i) => {
-                                    const progress = book.current_page && book.total_paragraphs > 0
-                                        ? Math.round(((book.current_page * 10) / book.total_paragraphs) * 100) : 0;
+                                    const progress = book.current_page != null && book.total_paragraphs > 0
+                                        ? Math.round(((book.current_page + 1) / book.total_paragraphs) * 100) : 0;
                                     return (
                                         <div key={book.id} style={{ position: 'relative' }}>
                                             <button onClick={() => {
@@ -1715,7 +1858,17 @@ const StudyApp: React.FC = () => {
                         {/* Bottom row: center page info, right function buttons */}
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
                             <span style={{ fontSize: 12, color: '#aaa' }}>{page} / {totalPages}</span>
-                            <div style={{ position: 'absolute', right: 0, display: 'flex', gap: 16 }}>
+                            <div style={{ position: 'absolute', right: 0, display: 'flex', gap: 12 }}>
+                                <button onClick={saveBookmark} aria-label={bookmark ? '更新书签' : '保存书签'}
+                                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                                    <span style={{ fontSize: 15, lineHeight: 1, color: bookmark ? c.primary : '#666' }}>{bookmark ? '★' : '☆'}</span>
+                                    <span style={{ fontSize: 9, color: bookmark ? c.primary : '#aaa' }}>书签</span>
+                                </button>
+                                <button onClick={jumpToBookmark} disabled={!bookmark} aria-label="回到书签"
+                                    style={{ background: 'none', border: 'none', cursor: bookmark ? 'pointer' : 'default', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1, opacity: bookmark ? 1 : 0.45 }}>
+                                    <span style={{ fontSize: 14, lineHeight: 1, color: '#666' }}>↩</span>
+                                    <span style={{ fontSize: 9, color: '#aaa' }}>回书签</span>
+                                </button>
                                 <button onClick={() => setShowFontPanel(v => !v)}
                                     style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
                                     <span style={{ fontSize: 14, lineHeight: 1, color: showFontPanel ? c.primary : '#666', fontWeight: 700, fontFamily: 'serif' }}>Aa</span>
