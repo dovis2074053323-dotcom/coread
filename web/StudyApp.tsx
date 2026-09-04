@@ -290,7 +290,7 @@ const StudyApp: React.FC = () => {
     const [newReplies, setNewReplies] = useState<ReplyNotice[]>([]);
     const [showReplies, setShowReplies] = useState(false);
     const [returnPoint, setReturnPoint] = useState<{ page: number; paraIdx: number | null } | null>(null);
-    const [floatingBar, setFloatingBar] = useState<{ startPara: number; endPara: number; text: string; start: number; end: number; top: number; left: number } | null>(null);
+    const [floatingBar, setFloatingBar] = useState<{ startPara: number; endPara: number; text: string; start: number; end: number } | null>(null);
 
     // 共读上下文范围（±字符数）。同一个值 Phase 3 同时用于「批注触发 AI」和
     // 「从选中句主动讨论」。localStorage 只作即时回显，真值以服务端 config 表为准。
@@ -626,14 +626,7 @@ const StudyApp: React.FC = () => {
                     pre2.setEnd(range.endContainer, range.endOffset);
                     endOff = endBase + pre2.toString().length;
                 }
-                // 轻量操作条锚在选区上方：取选区末端行的位置，换算成滚动容器内坐标。
-                const rects = range.getClientRects();
-                const anchorRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
-                const cont = contentRef.current;
-                const contRect = cont?.getBoundingClientRect();
-                const top = (contRect ? anchorRect.top - contRect.top : anchorRect.top) + (cont?.scrollTop || 0);
-                const left = (contRect ? anchorRect.left - contRect.left : anchorRect.left) + anchorRect.width / 2;
-                setFloatingBar({ startPara, endPara, text, start: startOff, end: endOff, top, left });
+                setFloatingBar({ startPara, endPara, text, start: startOff, end: endOff });
             } catch { setFloatingBar(null); }
         };
         document.addEventListener('selectionchange', handler);
@@ -1599,8 +1592,10 @@ const StudyApp: React.FC = () => {
                             <input autoFocus value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="写回应…"
                                 onKeyDown={e => { if (e.key === 'Enter') handleAddComment(); }}
                                 style={{ flex: 1, border: `1px solid ${c.primaryBorder}`, borderRadius: 8, padding: '5px 10px', fontSize: 12, outline: 'none', background: readerNightMode ? 'rgba(255,255,255,0.06)' : '#fff', color: nightBody }} />
-                            <button onClick={handleAddComment} style={{ background: c.primary, color: '#fff', border: 'none', borderRadius: 8, padding: '5px 12px', fontSize: 11, cursor: 'pointer' }}>发送</button>
-                            <button onClick={() => { setReplyingTo(null); setCommentText(''); }} style={{ background: 'none', border: `1px solid ${c.primaryBorder}`, borderRadius: 8, padding: '5px 8px', fontSize: 11, color: c.muted, cursor: 'pointer' }}>×</button>
+                            <button onClick={handleAddComment} disabled={!commentText.trim()} aria-label="发送回应" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: 28, height: 28, background: c.primary, border: 'none', borderRadius: '50%', cursor: commentText.trim() ? 'pointer' : 'default', opacity: commentText.trim() ? 1 : 0.5 }}>
+                                <SendIcon color="#fff" size={13} />
+                            </button>
+                            <button onClick={() => { setReplyingTo(null); setCommentText(''); }} style={{ background: 'none', border: 'none', padding: '5px 6px', fontSize: 14, color: c.muted, cursor: 'pointer', flexShrink: 0 }}>×</button>
                         </div>
                     )}
                     {kids(cmt.id).map(k => note(k, depth + 1))}
@@ -1661,6 +1656,18 @@ const StudyApp: React.FC = () => {
             <path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
             <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
             <line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" />
+        </svg>
+    );
+    // 批注体系统一图标：写批注入口用线性 pencil，保存/发送统一用纸飞机——
+    // 两处不再各写各的文字按钮。
+    const AnnotationIcon = ({ color, size = 15 }: { color: string; size?: number }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+        </svg>
+    );
+    const SendIcon = ({ color, size = 15 }: { color: string; size?: number }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
         </svg>
     );
 
@@ -1909,28 +1916,32 @@ const StudyApp: React.FC = () => {
                     }} />
                 )}
 
-                {/* 轻量操作条 — 锚在选区上方，一步进入写批注 */}
-                {floatingBar && mode === 'reading' && commentingIdx === null && (
-                    <div style={{
-                        position: 'absolute',
-                        top: Math.max(4, floatingBar.top - 42),
-                        left: `clamp(60px, ${Math.round(floatingBar.left)}px, calc(100% - 60px))`,
-                        transform: 'translateX(-50%)', zIndex: 25,
-                    }}>
-                        <button onPointerDown={(e) => { e.preventDefault(); startAnnotation(); }} style={{
-                            display: 'flex', alignItems: 'center', gap: 6,
-                            background: readerNightMode ? '#302d27' : '#fff',
-                            color: readerNightMode ? READER_INK_NIGHT : READER_INK,
-                            border: `1px solid ${c.primaryBorder}`, borderRadius: 10,
-                            padding: '6px 14px', fontSize: 12, fontWeight: 600,
-                            boxShadow: '0 2px 12px rgba(0,0,0,0.14)', cursor: 'pointer', whiteSpace: 'nowrap',
-                        }}>
-                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: c.primary }} />
-                            写批注
-                        </button>
-                    </div>
-                )}
             </div>
+
+            {/* 选区底部操作条 — 不再锚在选区上方（会被 Android/Chrome 原生长按菜单和选择手柄
+                挡住、点不到），改成固定在屏幕底部、阅读工具栏上方；原生长按选词/选择手柄/
+                复制/全选完全不受影响。 */}
+            {floatingBar && mode === 'reading' && commentingIdx === null && (
+                <div style={{
+                    position: 'absolute', left: 0, right: 0, zIndex: 34,
+                    bottom: showBar ? 106 : 30,
+                    display: 'flex', justifyContent: 'center',
+                    transition: 'bottom 0.3s ease',
+                    pointerEvents: 'none',
+                }}>
+                    <button onPointerDown={(e) => { e.preventDefault(); startAnnotation(); }} style={{
+                        display: 'flex', alignItems: 'center', gap: 7, pointerEvents: 'auto',
+                        background: readerNightMode ? '#302d27' : '#fff',
+                        color: readerNightMode ? READER_INK_NIGHT : READER_INK,
+                        border: `1px solid ${c.primaryBorder}`, borderRadius: 22,
+                        padding: '9px 18px', fontSize: 13, fontWeight: 600,
+                        boxShadow: '0 4px 18px rgba(0,0,0,0.18)', cursor: 'pointer', whiteSpace: 'nowrap',
+                    }}>
+                        <AnnotationIcon color={c.primary} size={15} />
+                        写批注
+                    </button>
+                </div>
+            )}
 
             {/* 新建批注编辑框 — 安静的纸面卡片，不抢正文 */}
             {mode === 'reading' && commentingIdx !== null && !replyingTo && (
@@ -1949,9 +1960,11 @@ const StudyApp: React.FC = () => {
                         style={{ width: '100%', minHeight: 68, border: 'none', background: 'transparent', fontSize: 14, color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, resize: 'none', outline: 'none', lineHeight: 1.6, fontFamily: READER_SERIF }} autoFocus />
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
                         <button onClick={() => { setCommentingIdx(null); setCommentText(''); setSelectedText(''); setSelRange(null); }}
-                            style={{ background: 'none', border: `1px solid ${c.primaryBorder}`, borderRadius: 10, padding: '7px 16px', fontSize: 12, color: c.muted, cursor: 'pointer' }}>取消</button>
-                        <button onClick={handleAddComment}
-                            style={{ background: c.primary, border: 'none', borderRadius: 10, padding: '7px 18px', fontSize: 12, color: 'white', cursor: 'pointer', fontWeight: 600, opacity: commentText.trim() ? 1 : 0.5 }}>保存</button>
+                            style={{ background: 'none', border: 'none', padding: '7px 10px', fontSize: 12, color: c.muted, cursor: 'pointer' }}>取消</button>
+                        <button onClick={handleAddComment} disabled={!commentText.trim()} aria-label="保存批注"
+                            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 34, height: 34, background: c.primary, border: 'none', borderRadius: '50%', cursor: commentText.trim() ? 'pointer' : 'default', opacity: commentText.trim() ? 1 : 0.5 }}>
+                            <SendIcon color="#fff" size={15} />
+                        </button>
                     </div>
                 </div>
             )}
