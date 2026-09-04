@@ -5,6 +5,7 @@ import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
 import { initDb, getDb } from './lib/db.mjs';
 import { handleRequest } from './lib/routes.mjs';
+import { postAnnotationEvent, bridgeConfigured } from './lib/bridge.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.COREAD_PORT || '3000');
@@ -48,7 +49,11 @@ const MIME = {
 };
 
 const server = http.createServer(async (req, res) => {
-  const handled = await handleRequest(req, res, { port: PORT, onComment: notifyComment });
+  const handled = await handleRequest(req, res, {
+    port: PORT,
+    onComment: notifyComment,
+    onAnnotationEvent: bridgeConfigured() ? postAnnotationEvent : null,
+  });
   if (handled) return;
 
   // Serve static files from public/

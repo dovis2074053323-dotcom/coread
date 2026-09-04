@@ -7,6 +7,7 @@ import { Readable } from 'node:stream';
 import test from 'node:test';
 import { getDb, initDb } from '../lib/db.mjs';
 import { handleRequest } from '../lib/routes.mjs';
+import { extractContext } from '../lib/annotation-event.mjs';
 
 const require = createRequire(import.meta.url);
 const Database = require('better-sqlite3');
@@ -16,7 +17,7 @@ const tempRoot = mkdtempSync(join(tmpdir(), 'coread-v1-'));
 const dbPath = join(tempRoot, 'coread.db');
 initDb(dbPath);
 
-async function request(method, url, body) {
+async function request(method, url, body, extraOpts = {}) {
   const req = Readable.from(body === undefined ? [] : [JSON.stringify(body)]);
   req.method = method;
   req.url = url;
@@ -38,7 +39,7 @@ async function request(method, url, body) {
       resolveResponse();
     },
   };
-  const handled = await handleRequest(req, res, { port: 3000 });
+  const handled = await handleRequest(req, res, { port: 3000, ...extraOpts });
   await done;
   let json = null;
   try { json = responseBody ? JSON.parse(responseBody) : null; } catch {}
@@ -192,4 +193,89 @@ test('context_chars setting: default, persistence, and validation', async () => 
 
   const custom = await request('PUT', '/v1/settings', { context_chars: 450 });
   assert.equal(custom.body.context_chars, 450);
+});
+
+test('extractContext walks paragraphs and stops at book edges', () => {
+  const paras = [
+    { idx: 0, content: 'AAAAAAAAAA' },
+    { idx: 1, content: 'BBBBBBBBBB' },
+    { idx: 2, content: 'CCCCCCCCCC' },
+    { idx: 3, content: 'DDDDDDDDDD' },
+    { idx: 4, content: 'EEEEEEEEEE' },
+  ];
+
+  const mid = extractContext(paras, { startParaIdx: 2, endParaIdx: 2, startIdx: 3, endIdx: 7 }, 8);
+  assert.equal(mid.selected_text, 'CCCC');
+  assert.equal(mid.context_before, 'BBB\n\nCCC');
+  assert.equal(mid.context_after, 'CCC\n\nDDD');
+
+  const atStart = extractContext(paras, { startParaIdx: 0, endParaIdx: 0, startIdx: 2, endIdx: 5 }, 100);
+  assert.equal(atStart.context_before, 'AA');
+
+  const atEnd = extractContext(paras, { startParaIdx: 4, endParaIdx: 4, startIdx: 0, endIdx: 10 }, 100);
+  assert.equal(atEnd.context_after, '');
+  assert.equal(atEnd.context_before, 'AAAAAAAAAA\n\nBBBBBBBBBB\n\nCCCCCCCCCC\n\nDDDDDDDDDD\n\n');
+
+  const cross = extractContext(paras, { startParaIdx: 1, endParaIdx: 3, startIdx: 5, endIdx: 4 }, 3);
+  assert.equal(cross.context_before, 'BBB');
+  assert.equal(cross.context_after, 'DDD');
+  assert.equal(cross.selected_text, 'BBBBB\n\nCCCCCCCCCC\n\nDDDD');
+});
+
+test('human annotation emits a context-rich event; AI write-back does not', async () => {
+  initDb(dbPath);
+  await request('PUT', '/v1/settings', { context_chars: 300 });
+  const created = await request('POST', '/v1/books', {
+    title: '事件夹具',
+    content: '第一段内容在这里。\n\n第二段这里有一句想划的话，就是这句。\n\n第三段收尾。',
+  });
+  const bookId = created.body.book_id;
+  await request('PATCH', `/v1/books/${bookId}/progress`, { page: 1, char_offset: 4 });
+
+  const events = [];
+  const onAnnotationEvent = (e) => events.push(e);
+
+  const human = await request('POST', `/v1/books/${bookId}/comment`, {
+    paragraph_idx: 1,
+    sel_start_idx: 4,
+    sel_end_idx: 9,
+    selected_text: '这里有一句',
+    content: '这句话让我想到……',
+    from_who: 'human',
+  }, { onAnnotationEvent });
+  assert.equal(human.statusCode, 200);
+  assert.equal(events.length, 1);
+  const event = events[0];
+  assert.equal(event.type, 'coread.annotation.created');
+  assert.equal(event.book_id, bookId);
+  assert.equal(event.book_title, '事件夹具');
+  assert.equal(event.comment_id, human.body.id);
+  assert.equal(event.from, 'human');
+  assert.equal(event.comment, '这句话让我想到……');
+  assert.equal(event.anchor.start_para, 1);
+  assert.equal(event.selected_text, '这里有一句');
+  assert.equal(event.context_chars, 300);
+  assert.match(event.context_before, /第一段内容在这里/);
+  assert.match(event.context_after, /第三段收尾/);
+  assert.equal(event.reading_progress.paragraph_idx, 1);
+  assert.equal(event.reading_progress.char_offset, 4);
+
+  const ai = await request('POST', `/v1/books/${bookId}/comment`, {
+    paragraph_idx: 1,
+    content: '页边回应',
+    from_who: 'cc',
+    reply_to: human.body.id,
+  }, { onAnnotationEvent });
+  assert.equal(ai.statusCode, 200);
+  assert.equal(events.length, 1, 'AI write-back must not emit another event');
+
+  const humanReply = await request('POST', `/v1/books/${bookId}/comment`, {
+    paragraph_idx: 1,
+    content: '我又想到一点',
+    from_who: 'human',
+    reply_to: human.body.id,
+  }, { onAnnotationEvent });
+  assert.equal(events.length, 2);
+  assert.equal(events[1].reply_to, human.body.id);
+  assert.equal(events[1].reply_to_comment.comment, '这句话让我想到……');
 });
