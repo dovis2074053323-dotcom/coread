@@ -16,6 +16,18 @@ async function request(path: string, opts?: RequestInit) {
   return res.json();
 }
 
+// CoRead 绑定：谁在接批注，是 Morrow 自己的 /api 命名空间（不在 /coread 挂载路径
+// 下），走浏览器 cookie 鉴权，不带 x-owner-key。同源部署下 fetch 默认就带 cookie；
+// 独立跑 coread（不挂在 Morrow 下）时这几个请求会失败，绑定 UI 就只显示"未绑定"。
+async function morrowRequest(path: string, opts?: RequestInit) {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: { 'Content-Type': 'application/json', 'x-morrow-request': '1' },
+    ...opts,
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
 export const api = {
   fetchBooks: () => request('/v1/books'),
   fetchBookDetail: (bookId: number, page = 1) =>
@@ -53,4 +65,11 @@ export const api = {
   fetchBookBookmark: (bookId: number) => request(`/v1/books/${bookId}/bookmark`),
   updateBookBookmark: (bookId: number, data: { page: number; paragraph_idx: number; char_offset?: number }) =>
     request(`/v1/books/${bookId}/bookmark`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  // 共读绑定：批注持续投给哪个已有的 cc 聊天会话（CoRead Final）。
+  fetchCoreadBinding: () => morrowRequest('/api/coread/binding'),
+  updateCoreadBinding: (sessionId: string) =>
+    morrowRequest('/api/coread/binding', { method: 'PUT', body: JSON.stringify({ sessionId }) }),
+  clearCoreadBinding: () => morrowRequest('/api/coread/binding', { method: 'DELETE' }),
+  fetchCoreadBindingCandidates: () => morrowRequest('/api/coread/candidate-sessions'),
 };

@@ -52,6 +52,13 @@ interface Comment { id: number; book_id: number; paragraph_idx: number; sel_end_
 interface Bookmark { page: number; paragraph_idx: number; char_offset: number; created_at?: string | null; updated_at?: string | null; }
 interface PageBreak { paraIndex: number; offset: number; }
 interface PageFragment extends Paragraph { sourceIdx: number; startOffset: number; endOffset: number; isPartialStart: boolean; isPartialEnd: boolean; }
+interface CoreadBinding {
+    sessionId: string | null;
+    valid: boolean;
+    reason: string | null;
+    session: { id: string; title: string; lastActivityAt: number } | null;
+}
+interface BindingCandidate { id: string; title: string; lastActivityAt: number; }
 interface ReplyNotice {
     id: number;
     paragraph_idx: number;
@@ -314,6 +321,45 @@ const StudyApp: React.FC = () => {
             }
         }).catch(() => {});
     }, []);
+
+    // 共读绑定（CoRead Final）：批注持续投给哪个既有 cc 聊天会话。不是"最近聊天"，
+    // 是 vv 手动选定、持久化在 Morrow 一侧、重启也不变的固定目标——这里只负责
+    // 显示当前绑定 + 提供选择器，真正的解析/校验在 Morrow 服务端。
+    const [coreadBinding, setCoreadBinding] = useState<CoreadBinding | null>(null);
+    const [showBindingPicker, setShowBindingPicker] = useState(false);
+    const [bindingCandidates, setBindingCandidates] = useState<BindingCandidate[]>([]);
+    const [bindingLoading, setBindingLoading] = useState(false);
+    const [bindingError, setBindingError] = useState<string | null>(null);
+    const refreshCoreadBinding = useCallback(() => {
+        api.fetchCoreadBinding().then((d: any) => setCoreadBinding(d)).catch(() => setCoreadBinding(null));
+    }, []);
+    useEffect(() => { refreshCoreadBinding(); }, [refreshCoreadBinding]);
+    const openBindingPicker = useCallback(() => {
+        setBindingError(null);
+        setShowBindingPicker(true);
+        setBindingLoading(true);
+        api.fetchCoreadBindingCandidates()
+            .then((d: any) => setBindingCandidates(Array.isArray(d?.sessions) ? d.sessions : []))
+            .catch(() => setBindingError('会话列表加载失败'))
+            .finally(() => setBindingLoading(false));
+    }, []);
+    const chooseBindingCandidate = useCallback((sessionId: string) => {
+        setBindingError(null);
+        api.updateCoreadBinding(sessionId)
+            .then((d: any) => { setCoreadBinding(d); setShowBindingPicker(false); })
+            .catch(() => setBindingError('绑定失败，请重试'));
+    }, []);
+    const unbindCoread = useCallback(() => {
+        setBindingError(null);
+        api.clearCoreadBinding()
+            .then(() => { setCoreadBinding({ sessionId: null, valid: false, reason: 'unbound', session: null }); setShowBindingPicker(false); })
+            .catch(() => setBindingError('解绑失败，请重试'));
+    }, []);
+    const bindingLabel = (() => {
+        if (!coreadBinding || coreadBinding.sessionId == null) return '未绑定';
+        if (coreadBinding.valid && coreadBinding.session) return coreadBinding.session.title || '（无标题）';
+        return coreadBinding.reason === 'closed' ? '原会话已关闭' : '原会话不可用';
+    })();
 
     const [showToc, setShowToc] = useState(false);
     const [tocChapters, setTocChapters] = useState<{ idx: number; page: number; title: string }[]>([]);
@@ -2072,6 +2118,23 @@ const StudyApp: React.FC = () => {
                                 </div>
                             )}
                         </div>
+
+                        {/* 共读对象 — 批注持续投给哪个既有 cc 聊天会话（CoRead Final）。
+                            不随「最近聊天」自动变化，只在这里手动切换。 */}
+                        <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${c.primaryBorder}` }}>
+                            <div style={{ fontSize: 11, color: c.muted, marginBottom: 8, letterSpacing: 0.3 }}>
+                                共读对象
+                            </div>
+                            <button onClick={openBindingPicker} style={{
+                                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                padding: '9px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                                border: `1.5px solid ${c.primaryBorder}`, background: 'transparent',
+                                color: readerNightMode ? '#c9c2b6' : '#4a453c',
+                            }}>
+                                <span>共读对象 · {aiName} · {bindingLabel}</span>
+                                <span style={{ fontSize: 11, color: c.muted }}>切换 ›</span>
+                            </button>
+                        </div>
                     </div>
                 </>
             )}
@@ -2098,6 +2161,54 @@ const StudyApp: React.FC = () => {
                             <span style={{ fontSize: 12, color: c.primary, fontWeight: 600, minWidth: 28, textAlign: 'center' }}>{readerFontSize}px</span>
                         </div>
                         <button onClick={() => setShowSettings(false)} style={{ width: '100%', padding: '10px 0', borderRadius: 14, background: c.primary, border: 'none', color: 'white', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>完成</button>
+                    </div>
+                </div>
+            )}
+
+            {/* CoRead 绑定选择器 — 只列 resident=claude-code / purpose=chat / 未关闭的会话。
+                不做「自动绑定最近会话」；选中即立即持久化到 Morrow 一侧。 */}
+            {showBindingPicker && (
+                <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.3)', backdropFilter: 'blur(4px)', zIndex: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+                    onClick={() => setShowBindingPicker(false)}>
+                    <div onClick={(e) => e.stopPropagation()} style={{
+                        background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(20px)', borderRadius: 20,
+                        padding: 20, width: '100%', maxWidth: 360, maxHeight: '70vh', display: 'flex', flexDirection: 'column',
+                        border: `1px solid ${c.primaryBorder}`, boxShadow: '0 12px 40px rgba(0,0,0,0.1)',
+                    }}>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: c.primaryDark, marginBottom: 4 }}>共读对象</div>
+                        <div style={{ fontSize: 11, color: '#999', marginBottom: 14 }}>批注会持续投给这里选的聊天，直到你换一个</div>
+                        {bindingError && <div style={{ fontSize: 12, color: '#e66', marginBottom: 10 }}>{bindingError}</div>}
+                        <div className="no-scrollbar" style={{ overflowY: 'auto', flex: 1, marginBottom: 12 }}>
+                            {bindingLoading && <div style={{ fontSize: 12, color: '#999', padding: '12px 4px' }}>加载中…</div>}
+                            {!bindingLoading && bindingCandidates.length === 0 && (
+                                <div style={{ fontSize: 12, color: '#999', padding: '12px 4px' }}>没有可选的聊天会话</div>
+                            )}
+                            {!bindingLoading && bindingCandidates.map((candidate) => {
+                                const isCurrent = candidate.id === coreadBinding?.sessionId;
+                                return (
+                                    <button key={candidate.id} onClick={() => chooseBindingCandidate(candidate.id)} style={{
+                                        width: '100%', textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 2,
+                                        padding: '10px 12px', borderRadius: 10, marginBottom: 6, cursor: 'pointer',
+                                        border: `1.5px solid ${isCurrent ? c.primary : c.primaryBorder}`,
+                                        background: isCurrent ? `${c.primary}12` : 'transparent',
+                                    }}>
+                                        <span style={{ fontSize: 13, fontWeight: isCurrent ? 600 : 400, color: isCurrent ? c.primary : '#333' }}>
+                                            {candidate.title || '（无标题）'}{isCurrent ? ' · 当前' : ''}
+                                        </span>
+                                        <span style={{ fontSize: 11, color: '#aaa' }}>
+                                            最近活动 {new Date(candidate.lastActivityAt).toLocaleString()}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        <div style={{ display: 'flex', gap: 10 }}>
+                            <button onClick={unbindCoread} disabled={!coreadBinding?.sessionId} style={{
+                                flex: 1, padding: '10px 0', borderRadius: 14, border: `1px solid ${c.primaryBorder}`, background: 'white',
+                                fontSize: 13, color: coreadBinding?.sessionId ? '#e66' : '#ccc', cursor: coreadBinding?.sessionId ? 'pointer' : 'default',
+                            }}>解绑</button>
+                            <button onClick={() => setShowBindingPicker(false)} style={{ flex: 1, padding: '10px 0', borderRadius: 14, border: 'none', background: c.primary, fontSize: 13, color: 'white', cursor: 'pointer', fontWeight: 600 }}>关闭</button>
+                        </div>
                     </div>
                 </div>
             )}
