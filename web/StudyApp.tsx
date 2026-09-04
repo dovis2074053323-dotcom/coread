@@ -355,11 +355,6 @@ const StudyApp: React.FC = () => {
             .then(() => { setCoreadBinding({ sessionId: null, valid: false, reason: 'unbound', session: null }); setShowBindingPicker(false); })
             .catch(() => setBindingError('解绑失败，请重试'));
     }, []);
-    const bindingLabel = (() => {
-        if (!coreadBinding || coreadBinding.sessionId == null) return '未绑定';
-        if (coreadBinding.valid && coreadBinding.session) return coreadBinding.session.title || '（无标题）';
-        return coreadBinding.reason === 'closed' ? '原会话已关闭' : '原会话不可用';
-    })();
 
     const [showToc, setShowToc] = useState(false);
     const [tocChapters, setTocChapters] = useState<{ idx: number; page: number; title: string }[]>([]);
@@ -380,7 +375,6 @@ const StudyApp: React.FC = () => {
     const [uploading, setUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
     const [editMode, setEditMode] = useState(false);
     const [selectedBooks, setSelectedBooks] = useState<Set<number>>(new Set());
     const batchFileRef = useRef<HTMLInputElement>(null);
@@ -1338,19 +1332,6 @@ const StudyApp: React.FC = () => {
         window.open(coreadPath(`/v1/books/${activeBook.id}/export?format=epub`), '_blank');
     };
 
-    const handleDeleteBook = async (bookId: number) => {
-        try {
-            await api.deleteBook(bookId);
-            // 删书连缓存一起清（分页+段落+批注）
-            try { localStorage.removeItem(`pagebreaks-v3-${bookId}`); } catch {}
-            idbDel(`pagebreaks-v3-${bookId}`);
-            idbDelParas(`paras-v1-${bookId}`);
-            idbDelParas(`comments-v1-${bookId}`);
-            setConfirmDelete(null); loadBooks();
-            toast('已删除');
-        } catch (e: any) { toast(`删除失败: ${e.message}`); }
-    };
-
     const jumpToChapter = (chapter: { idx: number; page: number; title: string }) => {
         if (!activeBook) return;
         const targetIdx = chapter.idx ?? chapter.page;
@@ -1489,14 +1470,6 @@ const StudyApp: React.FC = () => {
         window.addEventListener('message', onParentMessage);
         return () => window.removeEventListener('message', onParentMessage);
     }, [mode]);
-
-    const requestClose = () => {
-        if (window.parent !== window) {
-            window.parent.postMessage({ type: 'morrow-coread-close' }, '*');
-            return;
-        }
-        window.history.back();
-    };
 
     const commentsForPara = (idx: number) => comments.filter(x => {
         if (x.sel_start_idx == null) return x.paragraph_idx === idx;
@@ -1655,36 +1628,79 @@ const StudyApp: React.FC = () => {
         width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
     };
 
+    // 书架 action row 四个按钮共用一套线性 SVG——尺寸、线宽统一，不再混用文字/emoji/Unicode
+    // 符号（vv 2026-09-05 反馈）。
+    const ACTION_ICON_SIZE = 18;
+    const ACTION_ICON_STROKE = 1.8;
+    const actionSvgProps = (color: string) => ({
+        width: ACTION_ICON_SIZE, height: ACTION_ICON_SIZE, viewBox: '0 0 24 24',
+        fill: 'none' as const, stroke: color, strokeWidth: ACTION_ICON_STROKE,
+        strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
+    });
+    const BindIcon = ({ color }: { color: string }) => (
+        <svg {...actionSvgProps(color)}><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5 8.4 8.4 0 0 1-4-.97L3 20l1.46-4.38A8.4 8.4 0 0 1 3.5 11.5 8.5 8.5 0 0 1 12 3a8.5 8.5 0 0 1 9 8.5Z" /></svg>
+    );
+    const EditIcon = ({ color }: { color: string }) => (
+        <svg {...actionSvgProps(color)}><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+    );
+    const CheckIcon = ({ color }: { color: string }) => (
+        <svg {...actionSvgProps(color)}><path d="M20 6 9 17l-5-5" /></svg>
+    );
+    const SlidersIcon = ({ color }: { color: string }) => (
+        <svg {...actionSvgProps(color)}>
+            <line x1="4" y1="6" x2="20" y2="6" /><circle cx="14" cy="6" r="2" fill={color} stroke="none" />
+            <line x1="4" y1="12" x2="20" y2="12" /><circle cx="8" cy="12" r="2" fill={color} stroke="none" />
+            <line x1="4" y1="18" x2="20" y2="18" /><circle cx="16" cy="18" r="2" fill={color} stroke="none" />
+        </svg>
+    );
+    const PlusIcon = ({ color }: { color: string }) => (
+        <svg {...actionSvgProps(color)}><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+    );
+    const TrashIcon = ({ color }: { color: string }) => (
+        <svg {...actionSvgProps(color)}>
+            <path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+            <line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" />
+        </svg>
+    );
+
     return (
         <div className="xiaowo-study" style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column', background: mode === 'reading' ? (readerNightMode ? PAPER_BG_NIGHT : PAPER_BG) : '#f8f8f6', position: 'relative', overflow: 'hidden', filter: mode === 'reading' && readerBrightness < 100 ? `brightness(${readerBrightness / 100})` : undefined }}>
             <style>{`${STUDY_THEME_CSS}\n@keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.04); } }`}</style>
             {/* Header — shelf always shows; reading mode header slides with toolbar */}
             {mode === 'shelf' ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 'calc(52px + env(safe-area-inset-top))', paddingLeft: 20, paddingRight: 20, paddingBottom: 12, flexShrink: 0 }}>
-                    <button onClick={requestClose} style={btnBase}>
-                        <span style={{ fontSize: 18, color: c.primary }}>‹</span>
+                // 外层 Morrow Page 头部已经管标题和返回（2026-09-05 改版）；这里只剩紧贴
+                // 在它下面的轻量 action row，不再自带返回键/标题/大顶距。
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10, paddingTop: 12, paddingLeft: 20, paddingRight: 20, paddingBottom: 12, flexShrink: 0 }}>
+                    <button onClick={openBindingPicker} style={btnBase} aria-label="绑定会话">
+                        <BindIcon color={c.primary} />
                     </button>
-                    <span style={{ fontSize: 16, fontWeight: 700, color: c.primaryDark, flex: 1 }}>Palimpsest</span>
                     {editMode && selectedBooks.size > 0 && (
                         <button onClick={async () => {
                             if (!confirm(`删除选中的 ${selectedBooks.size} 本书？`)) return;
                             for (const id of selectedBooks) {
-                                try { await api.deleteBook(id); } catch {}
+                                try {
+                                    await api.deleteBook(id);
+                                    try { localStorage.removeItem(`pagebreaks-v3-${id}`); } catch {}
+                                    idbDel(`pagebreaks-v3-${id}`);
+                                    idbDelParas(`paras-v1-${id}`);
+                                    idbDelParas(`comments-v1-${id}`);
+                                } catch {}
                             }
                             setSelectedBooks(new Set()); setEditMode(false); loadBooks();
                             toast(`已删除 ${selectedBooks.size} 本`);
-                        }} style={{ ...btnBase, background: '#e55', border: 'none' }}>
-                            <span style={{ fontSize: 12, color: 'white', fontWeight: 600 }}>删除{selectedBooks.size}</span>
+                        }} style={{ ...btnBase, background: '#e55', border: 'none' }} aria-label={`删除选中的${selectedBooks.size}本`}>
+                            <TrashIcon color="white" />
                         </button>
                     )}
-                    <button onClick={() => { setEditMode(!editMode); setSelectedBooks(new Set()); }} style={btnBase}>
-                        <span style={{ fontSize: 12, color: editMode ? '#e55' : c.primary, fontWeight: 600 }}>{editMode ? '完成' : '管理'}</span>
+                    <button onClick={() => { setEditMode(!editMode); setSelectedBooks(new Set()); }} style={btnBase} aria-label={editMode ? '完成管理' : '管理'}>
+                        {editMode ? <CheckIcon color={c.primary} /> : <EditIcon color={c.primary} />}
                     </button>
-                    <button onClick={() => setShowSettings(true)} style={btnBase}>
-                        <span style={{ fontSize: 14, color: c.primary }}>⚙</span>
+                    <button onClick={() => setShowSettings(true)} style={btnBase} aria-label="设置">
+                        <SlidersIcon color={c.primary} />
                     </button>
-                    <button onClick={() => setShowUpload(true)} style={btnBase}>
-                        <span style={{ fontSize: 20, color: c.primary, lineHeight: 1 }}>+</span>
+                    <button onClick={() => setShowUpload(true)} style={btnBase} aria-label="添加">
+                        <PlusIcon color={c.primary} />
                     </button>
                 </div>
             ) : (
@@ -1795,12 +1811,6 @@ const StudyApp: React.FC = () => {
                                                     <div style={{ fontSize: 11, fontWeight: 600, color: c.primaryDark, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } as any}>{book.title}</div>
                                                 </div>
                                             </button>
-                                            {!editMode && (
-                                                <button onClick={(e) => { e.stopPropagation(); setConfirmDelete(book.id); }}
-                                                    style={{ position: 'absolute', top: 4, left: 8, width: 20, height: 20, borderRadius: '50%', background: 'rgba(0,0,0,0.4)', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                                    <span style={{ color: 'white', fontSize: 12, lineHeight: 1 }}>×</span>
-                                                </button>
-                                            )}
                                         </div>
                                     );
                                 })}
@@ -2148,23 +2158,6 @@ const StudyApp: React.FC = () => {
                                 </div>
                             )}
                         </div>
-
-                        {/* 共读对象 — 批注持续投给哪个既有 cc 聊天会话（CoRead Final）。
-                            不随「最近聊天」自动变化，只在这里手动切换。 */}
-                        <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${c.primaryBorder}` }}>
-                            <div style={{ fontSize: 11, color: c.muted, marginBottom: 8, letterSpacing: 0.3 }}>
-                                共读对象
-                            </div>
-                            <button onClick={openBindingPicker} style={{
-                                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                padding: '9px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
-                                border: `1.5px solid ${c.primaryBorder}`, background: 'transparent',
-                                color: readerNightMode ? '#c9c2b6' : '#4a453c',
-                            }}>
-                                <span>共读对象 · {aiName} · {bindingLabel}</span>
-                                <span style={{ fontSize: 11, color: c.muted }}>切换 ›</span>
-                            </button>
-                        </div>
                     </div>
                 </>
             )}
@@ -2285,24 +2278,6 @@ const StudyApp: React.FC = () => {
                                 style={{ flex: 1, padding: '10px 0', borderRadius: 14, border: 'none', background: c.primary, fontSize: 13, color: 'white', cursor: 'pointer', fontWeight: 600, opacity: uploading ? 0.6 : 1 }}>
                                 {uploading ? '上传中...' : '添加到书架'}
                             </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Delete confirmation */}
-            {confirmDelete !== null && (
-                <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.3)', backdropFilter: 'blur(4px)', zIndex: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
-                    onClick={() => setConfirmDelete(null)}>
-                    <div onClick={(e) => e.stopPropagation()} style={{
-                        background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(20px)', borderRadius: 20,
-                        padding: 24, width: '100%', maxWidth: 300, textAlign: 'center', border: `1px solid ${c.primaryBorder}`,
-                    }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: '#333', marginBottom: 6 }}>确认删除？</div>
-                        <div style={{ fontSize: 12, color: '#999', marginBottom: 16 }}>书籍和所有批注都会被删除</div>
-                        <div style={{ display: 'flex', gap: 10 }}>
-                            <button onClick={() => setConfirmDelete(null)} style={{ flex: 1, padding: '10px 0', borderRadius: 14, border: `1px solid ${c.primaryBorder}`, background: 'white', fontSize: 13, color: '#999', cursor: 'pointer' }}>取消</button>
-                            <button onClick={() => handleDeleteBook(confirmDelete)} style={{ flex: 1, padding: '10px 0', borderRadius: 14, border: 'none', background: '#e66', fontSize: 13, color: 'white', cursor: 'pointer', fontWeight: 600 }}>删除</button>
                         </div>
                     </div>
                 </div>
