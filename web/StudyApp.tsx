@@ -2,24 +2,34 @@
 import React, { useState, useEffect, useCallback, useRef, startTransition, useLayoutEffect, useMemo } from 'react';
 import { api, coreadPath } from './api';
 
-function themeColors(h: number, s: number, l: number) {
-    const primary = `hsl(${h}, ${s}%, ${l}%)`;
-    const primaryLight = `hsl(${h}, ${s}%, 92%)`;
-    const primaryBg = `hsl(${h}, ${Math.max(s - 5, 0)}%, 96%)`;
-    const primaryBorder = `hsla(${h}, ${s}%, ${l}%, 0.18)`;
-    const primaryDark = `hsl(${h}, ${s}%, ${Math.max(l - 18, 20)}%)`;
-    const warmAccent = `hsl(${(h + 30) % 360}, ${Math.min(s + 10, 80)}%, 72%)`;
-    const warmBg = `hsl(${(h + 30) % 360}, ${Math.min(s + 10, 80)}%, 94%)`;
-    const grad1 = `hsl(${h}, ${Math.max(s - 5, 0)}%, 94%)`;
-    const grad2 = `hsl(${(h + 20) % 360}, ${Math.max(s - 8, 0)}%, 92%)`;
-    const grad3 = `hsl(${(h + 40) % 360}, ${Math.max(s - 12, 0)}%, 95%)`;
-    const shenColor = `hsl(${h}, ${Math.min(s + 5, 60)}%, ${Math.max(l - 5, 35)}%)`;
-    const shenBg = `hsl(${h}, ${Math.min(s + 5, 60)}%, 93%)`;
-    const tongColor = `hsl(${(h + 150) % 360}, 45%, 55%)`;
-    const tongBg = `hsl(${(h + 150) % 360}, 35%, 93%)`;
-    const shenHL = `hsla(${h}, ${Math.min(s + 10, 55)}%, 82%, 0.5)`;
-    const tongHL = `hsla(340, 50%, 82%, 0.5)`;
-    return { primary, primaryLight, primaryBg, primaryBorder, primaryDark, warmAccent, warmBg, grad1, grad2, grad3, shenColor, shenBg, tongColor, tongBg, shenHL, tongHL };
+// Morrow 暖纸主题：对齐 morrow/web tokens.css（--bg #f8f8f6 / --text #3d3929 /
+// --line #ebe7e1 / --action #bd5d3a / 衬线正文）。iframe 拿不到宿主的 CSS 变量，
+// 值写死在这里。参数保留只为兼容旧调用签名，实际忽略。
+function themeColors(_h?: number, _s?: number, _l?: number) {
+    const ink = '#3d3929';
+    const inkSoft = '#6b665e';
+    const muted = '#9a958b';
+    return {
+        primary: '#bd5d3a',
+        primaryLight: '#efe9e1',
+        primaryBg: '#f3efe8',
+        primaryBorder: 'rgba(61,57,41,0.10)',
+        primaryDark: ink,
+        warmAccent: '#c89a5d',
+        warmBg: '#efe7d9',
+        grad1: '#f5f2ec',
+        grad2: '#f3efe8',
+        grad3: '#f6f3ed',
+        // 神＝Resident（AI），彤＝用户。两种「笔迹」：Resident 用赭石暖色（与正文同色系，
+        // 像作者本人的手记），用户用安静的青灰（客座读者的旁批）。一眼可分，都不是聊天气泡。
+        shenColor: '#a8543a',
+        shenBg: 'rgba(189,93,58,0.09)',
+        tongColor: '#4f6b74',
+        tongBg: 'rgba(79,107,116,0.09)',
+        shenHL: 'rgba(189,93,58,0.17)',
+        tongHL: 'rgba(79,107,116,0.16)',
+        ink, inkSoft, muted,
+    };
 }
 
 interface Book {
@@ -70,15 +80,38 @@ const BOOK_COVERS = [
     'linear-gradient(145deg, rgba(212,203,230,0.86), rgba(248,246,251,0.76))',
 ];
 
+// 暖纸阅读面。正文永远是绝对主体——低信息密度、安静、无阴影（对齐 Morrow 铁律）。
+const PAPER_BG = '#f7f4ee';
+const PAPER_BG_NIGHT = '#1f1e1b';
+const READER_INK = '#3d3929';
+const READER_INK_SOFT = '#4a453c';
+const READER_INK_NIGHT = '#dcd5c9';
+const READER_INK_NIGHT_SOFT = '#b6aea2';
+const READER_SERIF = "Georgia, 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', serif";
+const CONTEXT_PRESETS = [100, 300, 600, 1200];
+
 const STUDY_THEME_CSS = `
 .xiaowo-study {
-    color: #41394f;
+    color: ${READER_INK};
 }
 .xiaowo-study button {
     transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
 }
 .xiaowo-study button:active {
     transform: scale(0.98);
+}
+.xiaowo-study ::selection {
+    background: rgba(189, 93, 58, 0.18);
+}
+.xiaowo-study .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    -webkit-overflow-scrolling: touch;
+}
+.xiaowo-study .no-scrollbar::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
 }
 `;
 
@@ -244,12 +277,43 @@ const StudyApp: React.FC = () => {
     const [commentText, setCommentText] = useState('');
     const [selectedText, setSelectedText] = useState('');
     const [selRange, setSelRange] = useState<{ startPara: number; endPara: number; start: number; end: number } | null>(null);
-    const [activeComments, setActiveComments] = useState<Comment[]>([]);
+    // 行间批注：不再用底部弹层，改成焦点态——高亮的批注 thread 滚进视野并轻微强调。
+    const [focusedThreadId, setFocusedThreadId] = useState<number | null>(null);
     const [replyingTo, setReplyingTo] = useState<Comment | null>(null);
     const [newReplies, setNewReplies] = useState<ReplyNotice[]>([]);
     const [showReplies, setShowReplies] = useState(false);
     const [returnPoint, setReturnPoint] = useState<{ page: number; paraIdx: number | null } | null>(null);
-    const [floatingBar, setFloatingBar] = useState<{ startPara: number; endPara: number; text: string; start: number; end: number } | null>(null);
+    const [floatingBar, setFloatingBar] = useState<{ startPara: number; endPara: number; text: string; start: number; end: number; top: number; left: number } | null>(null);
+
+    // 共读上下文范围（±字符数）。同一个值 Phase 3 同时用于「批注触发 AI」和
+    // 「从选中句主动讨论」。localStorage 只作即时回显，真值以服务端 config 表为准。
+    const [contextChars, setContextCharsState] = useState<number>(() => {
+        const v = parseInt(localStorage.getItem('coread-context-chars') || '300', 10);
+        return Number.isFinite(v) && v >= 50 && v <= 5000 ? v : 300;
+    });
+    const [contextCustom, setContextCustom] = useState(() => !CONTEXT_PRESETS.includes(
+        parseInt(localStorage.getItem('coread-context-chars') || '300', 10)
+    ));
+    const contextSaveTimer = useRef<any>(null);
+    const setContextChars = useCallback((value: number) => {
+        const clamped = Math.min(5000, Math.max(50, Math.round(value || 0) || 300));
+        setContextCharsState(clamped);
+        localStorage.setItem('coread-context-chars', String(clamped));
+        if (contextSaveTimer.current) clearTimeout(contextSaveTimer.current);
+        contextSaveTimer.current = setTimeout(() => {
+            api.updateSettings({ context_chars: clamped }).catch(() => {});
+        }, 500);
+    }, []);
+    useEffect(() => {
+        api.fetchSettings().then((d: any) => {
+            const v = Number(d?.context_chars);
+            if (Number.isFinite(v) && v >= 50 && v <= 5000) {
+                setContextCharsState(v);
+                localStorage.setItem('coread-context-chars', String(v));
+                setContextCustom(!CONTEXT_PRESETS.includes(v));
+            }
+        }).catch(() => {});
+    }, []);
 
     const [showToc, setShowToc] = useState(false);
     const [tocChapters, setTocChapters] = useState<{ idx: number; page: number; title: string }[]>([]);
@@ -292,7 +356,7 @@ const StudyApp: React.FC = () => {
     const touchStart = useRef<{ x: number; y: number; t: number } | null>(null);
 
     const toggleBar = () => {
-        if (activeComments.length > 0) { setActiveComments([]); return; }
+        if (focusedThreadId != null) { setFocusedThreadId(null); return; }
         if (floatingBar) return;
         setShowBar(prev => {
             const next = !prev;
@@ -449,7 +513,7 @@ const StudyApp: React.FC = () => {
 
     const returnToReadingPosition = () => {
         if (!returnPoint) return;
-        setActiveComments([]);
+        setFocusedThreadId(null);
         setShowReplies(false);
         setShowBar(false);
         const targetPage = returnPoint.paraIdx != null ? findPageForParaIdx(returnPoint.paraIdx) : -1;
@@ -465,27 +529,25 @@ const StudyApp: React.FC = () => {
         const { existing, replyTo, parent, paraIdx: targetParaIdx, offset: targetOffset } = resolveNoticeTarget(notice, pool);
         const targetPage = findPageForParaIdx(targetParaIdx, totalPages, targetOffset);
         if (targetPage >= 0) setPage(targetPage + 1);
-        const noticeComment: Comment = existing || {
-            id: notice.id,
-            book_id: activeBook?.id ?? 0,
-            paragraph_idx: targetParaIdx,
-            sel_end_para_idx: null,
-            sel_start_idx: targetOffset,
-            sel_end_idx: notice.parent_sel_end_idx ?? notice.sel_end_idx ?? null,
-            selected_text: notice.parent_selected_text ?? notice.selected_text ?? null,
-            from_who: notice.from_who || 'ai',
-            content: notice.content,
-            created_at: notice.created_at || new Date().toISOString(),
-            reply_to: replyTo,
-        };
-        const thread = parent
-            ? [parent, ...pool.filter(c => c.reply_to === parent.id || c.id === noticeComment.id)]
-            : [noticeComment];
-        setActiveComments(thread.some(c => c.id === noticeComment.id) ? thread : [...thread, noticeComment]);
         if (!existing) {
+            const noticeComment: Comment = {
+                id: notice.id,
+                book_id: activeBook?.id ?? 0,
+                paragraph_idx: targetParaIdx,
+                sel_end_para_idx: null,
+                sel_start_idx: targetOffset,
+                sel_end_idx: notice.parent_sel_end_idx ?? notice.sel_end_idx ?? null,
+                selected_text: notice.parent_selected_text ?? notice.selected_text ?? null,
+                from_who: notice.from_who || 'ai',
+                content: notice.content,
+                created_at: notice.created_at || new Date().toISOString(),
+                reply_to: replyTo,
+            };
             setComments(prev => prev.some(c => c.id === noticeComment.id) ? prev : [...prev, noticeComment]);
             setAllComments(prev => prev.some(c => c.id === noticeComment.id) ? prev : [...prev, noticeComment]);
         }
+        // 焦点落在 thread 顶层：行间 thread 会滚进视野并轻微强调。
+        setFocusedThreadId((parent?.id ?? replyTo) ?? notice.id);
     };
 
     // Selection change listener for floating annotation bar
@@ -524,12 +586,29 @@ const StudyApp: React.FC = () => {
                     pre2.setEnd(range.endContainer, range.endOffset);
                     endOff = endBase + pre2.toString().length;
                 }
-                setFloatingBar({ startPara, endPara, text, start: startOff, end: endOff });
+                // 轻量操作条锚在选区上方：取选区末端行的位置，换算成滚动容器内坐标。
+                const rects = range.getClientRects();
+                const anchorRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+                const cont = contentRef.current;
+                const contRect = cont?.getBoundingClientRect();
+                const top = (contRect ? anchorRect.top - contRect.top : anchorRect.top) + (cont?.scrollTop || 0);
+                const left = (contRect ? anchorRect.left - contRect.left : anchorRect.left) + anchorRect.width / 2;
+                setFloatingBar({ startPara, endPara, text, start: startOff, end: endOff, top, left });
             } catch { setFloatingBar(null); }
         };
         document.addEventListener('selectionchange', handler);
         return () => document.removeEventListener('selectionchange', handler);
     }, [mode]);
+
+    // 焦点批注：把对应的行间 thread 滚进视野中央（阅读区现在可纵向滚动，容得下页边批注）。
+    useEffect(() => {
+        if (focusedThreadId == null || mode !== 'reading') return;
+        const t = setTimeout(() => {
+            const el = contentRef.current?.querySelector(`[data-thread-anchor="${focusedThreadId}"]`);
+            (el as HTMLElement | null)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }, 60);
+        return () => clearTimeout(t);
+    }, [focusedThreadId, mode, page, pageFragments]);
 
     const loadBooks = async () => {
         setLoading(true); setError('');
@@ -687,7 +766,8 @@ const StudyApp: React.FC = () => {
 
     // 同书只存一份分页缓存，value里带测量时的尺寸，读取时容差校验。
     // 不能把精确像素拼进key：手机WebView每次打开视口差±几px，key永远miss，导致每次进书全书重新measure。
-    const paginationCacheKey = activeBook ? `pagebreaks-v2-${activeBook.id}-fs${readerFontSize}` : '';
+    // v3：正文换成衬线体，旧的（无衬线测量的）分页缓存必须失效重算。
+    const paginationCacheKey = activeBook ? `pagebreaks-v3-${activeBook.id}-fs${readerFontSize}` : '';
     const imgHeightCache = useRef<Map<string, number>>(new Map());
 
     const buildMeasureBlock = (para: Paragraph, sourceIdx: number, start: number, end: number) => {
@@ -717,6 +797,8 @@ const StudyApp: React.FC = () => {
             inner.style.fontWeight = String(chapterTitle ? 800 : heading ? 700 : 400);
             inner.style.textAlign = chapterTitle ? 'center' : '';
             inner.style.whiteSpace = 'pre-wrap';
+            // 分页测量的字体必须与正文渲染一致，否则断行/页数漂移。
+            inner.style.fontFamily = READER_SERIF;
             outer.appendChild(inner);
         }
 
@@ -1000,7 +1082,7 @@ const StudyApp: React.FC = () => {
                 try {
                     for (let i = localStorage.length - 1; i >= 0; i--) {
                         const k = localStorage.key(i);
-                        if (k && k.startsWith('pagebreaks-') && !k.startsWith('pagebreaks-v2-')) localStorage.removeItem(k);
+                        if (k && k.startsWith('pagebreaks-') && !k.startsWith('pagebreaks-v3-')) localStorage.removeItem(k);
                     }
                 } catch {}
                 // 主存 IndexedDB（配额足够，大书几百KB没问题）；写成功后清掉 localStorage 旧副本释放配额
@@ -1017,7 +1099,7 @@ const StudyApp: React.FC = () => {
                         try {
                             for (let i = localStorage.length - 1; i >= 0; i--) {
                                 const k = localStorage.key(i);
-                                if (k && k.startsWith('pagebreaks-v2-') && k !== paginationCacheKey) localStorage.removeItem(k);
+                                if (k && k.startsWith('pagebreaks-v3-') && k !== paginationCacheKey) localStorage.removeItem(k);
                             }
                             localStorage.setItem(paginationCacheKey, payload);
                         } catch {}
@@ -1087,7 +1169,7 @@ const StudyApp: React.FC = () => {
         if (!activeBook) return;
         const next = Math.max(1, Math.min(totalPages, page + delta));
         if (next !== page) {
-            setActiveComments([]); setCommentingIdx(null); setSelRange(null); setFloatingBar(null);
+            setFocusedThreadId(null); setReplyingTo(null); setCommentingIdx(null); setSelRange(null); setFloatingBar(null);
             setPage(next);
             if (next === totalPages && totalPages > 1) {
                 const bookTitle = activeBook.title?.replace(/\s*\(.*?\)\s*/g, '').trim();
@@ -1136,7 +1218,8 @@ const StudyApp: React.FC = () => {
             replyPageRef.current = null;
             suppressPageJumpRef.current = true;
             setCommentText(''); setSelectedText(''); setSelRange(null); setReplyingTo(null);
-            setActiveComments([]); setCommentingIdx(null);
+            setCommentingIdx(null);
+            setFocusedThreadId(replyingTo?.id ?? newComment.id);
             setComments(prev => [...prev, newComment]);
             setAllComments(prev => [...prev, newComment]);
             idbSetParas(`comments-v1-${activeBook.id}`, JSON.stringify([...allComments, newComment])).catch(() => {});
@@ -1150,7 +1233,7 @@ const StudyApp: React.FC = () => {
             await api.deleteBookComment(cmt.id);
             setComments(prev => prev.filter(x => x.id !== cmt.id));
             setAllComments(prev => prev.filter(x => x.id !== cmt.id));
-            setActiveComments(prev => prev.filter(x => x.id !== cmt.id));
+            setFocusedThreadId(prev => prev === cmt.id ? null : prev);
             idbSetParas(`comments-v1-${activeBook.id}`, JSON.stringify(allComments.filter(x => x.id !== cmt.id))).catch(() => {});
         } catch (e: any) { toast(`删除失败: ${e.message}`); }
     };
@@ -1184,7 +1267,7 @@ const StudyApp: React.FC = () => {
         if (!bookmark) return;
         if (!canJumpToPara(bookmark.paragraph_idx)) return;
         const targetPage = findPageForParaIdx(bookmark.paragraph_idx, totalPages, bookmark.char_offset);
-        setActiveComments([]);
+        setFocusedThreadId(null);
         setCommentingIdx(null);
         setSelRange(null);
         setFloatingBar(null);
@@ -1200,8 +1283,8 @@ const StudyApp: React.FC = () => {
         try {
             await api.deleteBook(bookId);
             // 删书连缓存一起清（分页+段落+批注）
-            try { localStorage.removeItem(`pagebreaks-v2-${bookId}`); } catch {}
-            idbDel(`pagebreaks-v2-${bookId}`);
+            try { localStorage.removeItem(`pagebreaks-v3-${bookId}`); } catch {}
+            idbDel(`pagebreaks-v3-${bookId}`);
             idbDelParas(`paras-v1-${bookId}`);
             idbDelParas(`comments-v1-${bookId}`);
             setConfirmDelete(null); loadBooks();
@@ -1213,7 +1296,7 @@ const StudyApp: React.FC = () => {
         if (!activeBook) return;
         const targetIdx = chapter.idx ?? chapter.page;
         if (!canJumpToPara(targetIdx)) return;
-        setShowToc(false); setActiveComments([]); setCommentingIdx(null); setSelRange(null); setFloatingBar(null);
+        setShowToc(false); setFocusedThreadId(null); setCommentingIdx(null); setSelRange(null); setFloatingBar(null);
         const targetPage = findPageForParaIdx(targetIdx);
         if (targetPage >= 0) setPage(targetPage + 1);
     };
@@ -1326,7 +1409,7 @@ const StudyApp: React.FC = () => {
     const backToShelf = () => {
         const pending = persistCurrentPosition();
         setMode('shelf'); setActiveBook(null); setParagraphs([]); setComments([]);
-        setActiveComments([]); setSelRange(null); setFloatingBar(null); setShowToc(false); setTocChapters([]);
+        setFocusedThreadId(null); setReplyingTo(null); setCommentingIdx(null); setSelRange(null); setFloatingBar(null); setShowToc(false); setTocChapters([]);
         setBookmark(null); setReturnPoint(null);
         Promise.resolve(pending).finally(() => loadBooks());
     };
@@ -1382,15 +1465,12 @@ const StudyApp: React.FC = () => {
                     onClick={(e) => {
                         if (window.getSelection()?.toString().trim()) return;
                         e.stopPropagation();
-                        const overlapping = positioned.filter(x => {
+                        const hit = positioned.find(x => {
                             const xs = Math.max(x.sel_start_idx!, 0), xe = Math.min(x.sel_end_idx!, text.length);
                             return xs < hEnd && xe > hStart;
                         });
-                        const allReplies: Comment[] = [];
-                        const findReplies = (ids: number[]) => { const found = comments.filter(r => r.reply_to && ids.includes(r.reply_to)); if (found.length) { allReplies.push(...found); findReplies(found.map(f => f.id)); } };
-                        findReplies(overlapping.map(o => o.id));
-                        const withReplies = [...overlapping, ...allReplies];
-                        setActiveComments(prev => prev.length > 0 && prev[0]?.id === overlapping[0]?.id ? [] : withReplies);
+                        const top = hit ? (hit.reply_to ?? hit.id) : null;
+                        setFocusedThreadId(prev => prev === top ? null : top);
                     }}
                     style={{
                         backgroundImage: `linear-gradient(${hlBg}, ${hlBg})`,
@@ -1416,6 +1496,82 @@ const StudyApp: React.FC = () => {
         return <>{parts}</>;
     };
 
+    const authorIsShen = (from: string) => from.toLowerCase() === 'ai' || from.toLowerCase() === aiName.toLowerCase();
+
+    // 行间 thread：批注 + 回应写在对应原文下方的页边，两位作者用不同「笔迹」
+    // （赭石=Resident / 青灰=用户 + 轻微缩进差），一眼可分，都不是聊天气泡。
+    const renderThread = (root: Comment): React.ReactNode => {
+        const kids = (parentId: number) =>
+            comments.filter(r => r.reply_to === parentId).sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+        let focused = focusedThreadId != null && focusedThreadId === root.id;
+        if (focusedThreadId != null && !focused) {
+            const stack = [root.id];
+            while (stack.length) {
+                const id = stack.pop()!;
+                for (const k of kids(id)) { if (k.id === focusedThreadId) { focused = true; } stack.push(k.id); }
+            }
+        }
+        const nightBody = readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT;
+
+        const note = (cmt: Comment, depth: number): React.ReactNode => {
+            const isShen = authorIsShen(cmt.from_who);
+            const rail = isShen ? c.shenColor : c.tongColor;
+            const tint = isShen ? c.shenBg : c.tongBg;
+            return (
+                <div key={cmt.id} style={{
+                    marginLeft: (isShen ? 18 : 2) + depth * 16,
+                    borderLeft: `2px solid ${rail}`,
+                    background: tint,
+                    borderRadius: '2px 8px 8px 2px',
+                    padding: '7px 12px 8px',
+                    marginBottom: 6,
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: rail, flexShrink: 0 }} />
+                        <span style={{ fontSize: 11, fontWeight: 700, color: rail, letterSpacing: 0.2 }}>{displayName(cmt.from_who)}</span>
+                        <span style={{ fontSize: 10, color: c.muted }}>{cmt.created_at?.slice(5, 16).replace('T', ' ')}</span>
+                    </div>
+                    {depth === 0 && cmt.selected_text && (
+                        <div style={{ fontSize: 11, color: c.muted, lineHeight: 1.5, margin: '2px 0 5px', paddingLeft: 8, borderLeft: `2px solid ${rail}55` }}>
+                            {cmt.selected_text.length > 120 ? cmt.selected_text.slice(0, 120) + '…' : cmt.selected_text}
+                        </div>
+                    )}
+                    <div style={{ fontSize: Math.max(12, readerFontSize - 1), lineHeight: 1.7, color: nightBody, fontFamily: READER_SERIF, whiteSpace: 'pre-wrap' }}>{cmt.content}</div>
+                    <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
+                        <button onClick={(e) => { e.stopPropagation(); replyPageRef.current = page; setReplyingTo(cmt); setCommentingIdx(cmt.paragraph_idx); setCommentText(''); }}
+                            style={{ background: 'none', border: 'none', padding: 0, fontSize: 11, color: c.muted, cursor: 'pointer' }}>回应</button>
+                        {!isShen && (
+                            <button onClick={(e) => { e.stopPropagation(); handleDeleteComment(cmt); }}
+                                style={{ background: 'none', border: 'none', padding: 0, fontSize: 11, color: c.muted, cursor: 'pointer' }}>删除</button>
+                        )}
+                    </div>
+                    {replyingTo?.id === cmt.id && (
+                        <div style={{ display: 'flex', gap: 6, marginTop: 6 }} onClick={(e) => e.stopPropagation()}>
+                            <input autoFocus value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="写回应…"
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddComment(); }}
+                                style={{ flex: 1, border: `1px solid ${c.primaryBorder}`, borderRadius: 8, padding: '5px 10px', fontSize: 12, outline: 'none', background: readerNightMode ? 'rgba(255,255,255,0.06)' : '#fff', color: nightBody }} />
+                            <button onClick={handleAddComment} style={{ background: c.primary, color: '#fff', border: 'none', borderRadius: 8, padding: '5px 12px', fontSize: 11, cursor: 'pointer' }}>发送</button>
+                            <button onClick={() => { setReplyingTo(null); setCommentText(''); }} style={{ background: 'none', border: `1px solid ${c.primaryBorder}`, borderRadius: 8, padding: '5px 8px', fontSize: 11, color: c.muted, cursor: 'pointer' }}>×</button>
+                        </div>
+                    )}
+                    {kids(cmt.id).map(k => note(k, depth + 1))}
+                </div>
+            );
+        };
+
+        return (
+            <div key={`thread-${root.id}`} data-thread-anchor={root.id} style={{
+                margin: `4px 0 ${PARA_GAP}px`,
+                borderRadius: 8,
+                outline: focused ? `1.5px solid ${c.primary}66` : '1.5px solid transparent',
+                outlineOffset: 3,
+                transition: 'outline-color 220ms ease',
+            }}>
+                {note(root, 0)}
+            </div>
+        );
+    };
+
     const btnBase: React.CSSProperties = {
         background: 'rgba(255,255,255,0.6)', backdropFilter: 'blur(18px) saturate(1.05)',
         WebkitBackdropFilter: 'blur(18px) saturate(1.05)',
@@ -1424,13 +1580,8 @@ const StudyApp: React.FC = () => {
     };
 
     return (
-        <div className="xiaowo-study" style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column', background: mode === 'reading' ? (readerNightMode ? '#1a1a1a' : '#fafaf8') : `linear-gradient(145deg, rgba(255,252,254,0.98), ${c.grad1} 48%, rgba(239,247,248,0.96))`, position: 'relative', overflow: 'hidden', filter: mode === 'reading' && readerBrightness < 100 ? `brightness(${readerBrightness / 100})` : undefined }}>
-            <style>{`${STUDY_THEME_CSS}\n@keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.05); } }`}</style>
-            {mode !== 'reading' && <>
-                <div style={{ position: 'absolute', top: -70, right: -40, width: 210, height: 210, borderRadius: '50%', background: `radial-gradient(circle, ${c.primaryLight}34, transparent 68%)`, pointerEvents: 'none', filter: 'blur(12px)', opacity: 0.7 }} />
-                <div style={{ position: 'absolute', bottom: 70, left: -70, width: 200, height: 200, borderRadius: '50%', background: `radial-gradient(circle, ${c.warmBg}34, transparent 68%)`, pointerEvents: 'none', filter: 'blur(12px)', opacity: 0.65 }} />
-            </>}
-
+        <div className="xiaowo-study" style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column', background: mode === 'reading' ? (readerNightMode ? PAPER_BG_NIGHT : PAPER_BG) : '#f8f8f6', position: 'relative', overflow: 'hidden', filter: mode === 'reading' && readerBrightness < 100 ? `brightness(${readerBrightness / 100})` : undefined }}>
+            <style>{`${STUDY_THEME_CSS}\n@keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.04); } }`}</style>
             {/* Header — shelf always shows; reading mode header slides with toolbar */}
             {mode === 'shelf' ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 'calc(52px + env(safe-area-inset-top))', paddingLeft: 20, paddingRight: 20, paddingBottom: 12, flexShrink: 0 }}>
@@ -1465,9 +1616,9 @@ const StudyApp: React.FC = () => {
                     {/* Persistent book title — always visible, small grey text */}
                     <div style={{
                         paddingTop: 'calc(12px + env(safe-area-inset-top))', paddingLeft: 20, paddingRight: 20, paddingBottom: 6, textAlign: 'center', flexShrink: 0,
-                        background: '#fafaf8',
+                        background: readerNightMode ? PAPER_BG_NIGHT : PAPER_BG,
                     }}>
-                        <div style={{ fontSize: 11, color: '#aaa', letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <div style={{ fontSize: 11, color: readerNightMode ? '#7a736a' : '#a8a196', letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {activeBook?.title || ''}
                         </div>
                     </div>
@@ -1487,11 +1638,12 @@ const StudyApp: React.FC = () => {
 
             {/* Content */}
             <div ref={contentRef} style={{
-                flex: 1, overflow: mode === 'reading' ? 'hidden' : 'auto', position: 'relative',
+                flex: 1, position: 'relative',
+                overflowX: 'hidden', overflowY: 'auto',
                 padding: mode === 'reading' ? '0' : '8px 20px 32px',
-                background: mode === 'reading' ? (readerNightMode ? '#1a1a1a' : '#fafaf8') : 'transparent',
+                background: mode === 'reading' ? (readerNightMode ? PAPER_BG_NIGHT : PAPER_BG) : 'transparent',
             }} className="no-scrollbar study-scroll-container"
-                onClick={() => { if (mode === 'reading') toggleBar(); else if (activeComments.length) setActiveComments([]); }}
+                onClick={() => { if (mode === 'reading') toggleBar(); else if (focusedThreadId != null) setFocusedThreadId(null); }}
                 onTouchStart={mode === 'reading' ? (e) => {
                     touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
                 } : undefined}
@@ -1597,8 +1749,10 @@ const StudyApp: React.FC = () => {
                         ) : allParas.length === 0 ? (
                             <div style={{ textAlign: 'center', padding: '40px 0', color: '#bbb', fontSize: 14 }}>这一页没有内容</div>
                         ) : (
-                            <div data-page-content style={{ padding: READER_PAGE_PADDING, minHeight: pageHeight || undefined, boxSizing: 'border-box', overflow: 'hidden' }}>
-                                {pageFragments.map((frag, visibleIndex) => {
+                            <div data-page-content style={{ padding: READER_PAGE_PADDING, paddingBottom: 'calc(44px + env(safe-area-inset-bottom))', minHeight: pageHeight || undefined, boxSizing: 'border-box', fontFamily: READER_SERIF }}>
+                                {(() => {
+                                const seenThreadIds = new Set<number>();
+                                return pageFragments.map((frag, visibleIndex) => {
                                     const original = allParas[frag.sourceIdx] || frag;
                                     const heading = isHeading(original.content) && !frag.isPartialStart;
                                     const chapterTitle = isChapterStart(original.content) && !frag.isPartialStart;
@@ -1613,7 +1767,9 @@ const StudyApp: React.FC = () => {
                                         return { ...h, sel_start_idx: s - frag.startOffset, sel_end_idx: e - frag.startOffset };
                                     }).filter(h => h.sel_end_idx! > 0 && h.sel_start_idx! < frag.content.length);
 
-                                    const blockComments = commentsForPara(frag.idx).filter(x => (x.sel_start_idx == null || x.sel_end_idx == null) && x.paragraph_idx === frag.idx && !frag.isPartialStart);
+                                    // 行间 thread：本 fragment 上、尚未渲染过的顶层批注（含无选区的整段批注）。
+                                    const fragThreads = commentsForPara(frag.idx).filter(x => !x.reply_to && !seenThreadIds.has(x.id));
+                                    fragThreads.forEach(x => seenThreadIds.add(x.id));
 
                                     const imgMatch = frag.content.match(/^\[IMG:([^\]]+)\]$/);
                                     if (imgMatch && activeBook) {
@@ -1628,38 +1784,34 @@ const StudyApp: React.FC = () => {
                                         <div key={`${frag.idx}-${frag.startOffset}-${frag.endOffset}`} style={{ marginBottom: chapterTitle ? CHAPTER_GAP_BOTTOM : PARA_GAP, marginTop: chapterTitle && visibleIndex > 0 ? CHAPTER_GAP_TOP : 0 }}>
                                             <div data-para-idx={frag.idx} data-frag-start={frag.startOffset} data-frag-end={frag.endOffset} style={{
                                                 fontSize: chapterTitle ? readerFontSize + 4 : original.content.trim().startsWith('# ') ? readerFontSize + 3 : original.content.trim().startsWith('## ') ? readerFontSize + 2 : readerFontSize,
-                                                lineHeight: chapterTitle ? 2.2 : 1.85, color: readerNightMode ? (heading ? '#ddd' : '#ccc') : (heading ? '#222' : '#333'),
+                                                lineHeight: chapterTitle ? 2.2 : 1.85,
+                                                color: readerNightMode ? (heading ? READER_INK_NIGHT : READER_INK_NIGHT_SOFT) : (heading ? '#2c2921' : READER_INK),
                                                 letterSpacing: chapterTitle ? 1 : 0.3, textIndent: (heading || chapterTitle || frag.isPartialStart) ? 0 : '1.5em',
                                                 fontWeight: chapterTitle ? 800 : heading ? 700 : 400, marginBottom: heading ? 4 : 0,
                                                 textAlign: chapterTitle ? 'center' : undefined,
+                                                fontFamily: READER_SERIF,
                                                 userSelect: 'text', WebkitUserSelect: 'text', whiteSpace: 'pre-wrap',
                                             } as any}>
                                                 {renderHighlighted(decodeEntities(frag.content), frag.idx, inlineComments)}
                                             </div>
 
-                                            {blockComments.length > 0 && (
-                                                <div style={{ marginTop: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                                    {blockComments.filter(x => !x.reply_to).map(cmt => {
-                                                        const isShen = cmt.from_who.toLowerCase() === 'ai' || cmt.from_who.toLowerCase() === aiName.toLowerCase();
-                                                        const color = isShen ? c.shenColor : c.tongColor;
-                                                        return (
-                                                            <span key={cmt.id} onClick={(e) => { e.stopPropagation(); const allR: Comment[] = []; const findR = (ids: number[]) => { const f = comments.filter(r => r.reply_to && ids.includes(r.reply_to)); if (f.length) { allR.push(...f); findR(f.map(x => x.id)); } }; findR([cmt.id]); setActiveComments(prev => prev.length > 0 && prev[0]?.id === cmt.id ? [] : [cmt, ...allR]); }}
-                                                                style={{ width: 8, height: 8, borderRadius: '50%', background: color, cursor: 'pointer', display: 'inline-block', opacity: 0.7 }} />
-                                                        );
-                                                    })}
+                                            {fragThreads.length > 0 && (
+                                                <div style={{ marginTop: 8 }}>
+                                                    {fragThreads.map(cmt => renderThread(cmt))}
                                                 </div>
                                             )}
                                         </div>
                                     );
-                                })}
+                                });
+                                })()}
                             </div>
                         )}
                     </>
                 )}
                 {mode === 'reading' && (
                     <div ref={measureRef} aria-hidden style={{
-                        position: 'absolute',
-                        top: -99999,
+                        position: 'fixed',
+                        top: 0,
                         left: 0,
                         width: readerContentWidth,
                         visibility: 'hidden',
@@ -1667,101 +1819,54 @@ const StudyApp: React.FC = () => {
                         zIndex: -1,
                         boxSizing: 'border-box',
                         whiteSpace: 'normal',
+                        fontFamily: READER_SERIF,
                     }} />
+                )}
+
+                {/* 轻量操作条 — 锚在选区上方，一步进入写批注 */}
+                {floatingBar && mode === 'reading' && commentingIdx === null && (
+                    <div style={{
+                        position: 'absolute',
+                        top: Math.max(4, floatingBar.top - 42),
+                        left: `clamp(60px, ${Math.round(floatingBar.left)}px, calc(100% - 60px))`,
+                        transform: 'translateX(-50%)', zIndex: 25,
+                    }}>
+                        <button onPointerDown={(e) => { e.preventDefault(); startAnnotation(); }} style={{
+                            display: 'flex', alignItems: 'center', gap: 6,
+                            background: readerNightMode ? '#302d27' : '#fff',
+                            color: readerNightMode ? READER_INK_NIGHT : READER_INK,
+                            border: `1px solid ${c.primaryBorder}`, borderRadius: 10,
+                            padding: '6px 14px', fontSize: 12, fontWeight: 600,
+                            boxShadow: '0 2px 12px rgba(0,0,0,0.14)', cursor: 'pointer', whiteSpace: 'nowrap',
+                        }}>
+                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: c.primary }} />
+                            写批注
+                        </button>
+                    </div>
                 )}
             </div>
 
-            {/* Floating annotation bar — appears when text is selected */}
-            {floatingBar && mode === 'reading' && commentingIdx === null && (
-                <div style={{
-                    position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
-                    background: c.primary, borderRadius: 20, padding: '10px 24px',
-                    boxShadow: '0 4px 20px rgba(0,0,0,0.15)', zIndex: 25, cursor: 'pointer',
-                }}
-                    onPointerDown={(e) => { e.preventDefault(); startAnnotation(); }}>
-                    <span style={{ color: 'white', fontSize: 13, fontWeight: 600 }}>添加批注</span>
-                </div>
-            )}
-
+            {/* 新建批注编辑框 — 安静的纸面卡片，不抢正文 */}
             {mode === 'reading' && commentingIdx !== null && !replyingTo && (
                 <div onClick={(e) => e.stopPropagation()} style={{
                     position: 'absolute', left: 16, right: 16, bottom: 20, zIndex: 32,
-                    background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(24px)',
-                    borderRadius: 20, padding: 16, border: `1px solid ${c.primaryBorder}`,
-                    boxShadow: '0 -4px 32px rgba(0,0,0,0.12)',
+                    background: readerNightMode ? '#2b2924' : '#fff',
+                    borderRadius: 14, padding: 14, border: `1px solid ${c.primaryBorder}`,
+                    boxShadow: '0 -2px 24px rgba(0,0,0,0.10)',
                 }}>
                     {selectedText && (
-                        <div style={{ fontSize: 12, color: '#777', fontStyle: 'italic', marginBottom: 10, padding: '8px 10px', background: c.tongHL, borderRadius: 12, lineHeight: 1.5, borderLeft: `3px solid ${c.tongColor}60`, maxHeight: 96, overflow: 'auto' }} className="no-scrollbar">
-                            {selectedText.length > 160 ? selectedText.slice(0, 160) + '...' : selectedText}
+                        <div style={{ fontSize: 12, color: c.muted, marginBottom: 10, padding: '7px 10px', background: c.tongBg, borderRadius: 8, lineHeight: 1.5, borderLeft: `2px solid ${c.tongColor}`, maxHeight: 96, overflow: 'auto' }} className="no-scrollbar">
+                            {selectedText.length > 160 ? selectedText.slice(0, 160) + '…' : selectedText}
                         </div>
                     )}
-                    <textarea value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="写下你的想法..."
-                        style={{ width: '100%', minHeight: 72, border: 'none', background: 'transparent', fontSize: 14, color: '#444', resize: 'none', outline: 'none', lineHeight: 1.6 }} autoFocus />
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+                    <textarea value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="写下你的想法…"
+                        style={{ width: '100%', minHeight: 68, border: 'none', background: 'transparent', fontSize: 14, color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, resize: 'none', outline: 'none', lineHeight: 1.6, fontFamily: READER_SERIF }} autoFocus />
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
                         <button onClick={() => { setCommentingIdx(null); setCommentText(''); setSelectedText(''); setSelRange(null); }}
-                            style={{ background: 'none', border: `1px solid ${c.primaryBorder}`, borderRadius: 12, padding: '7px 16px', fontSize: 12, color: '#999', cursor: 'pointer' }}>取消</button>
+                            style={{ background: 'none', border: `1px solid ${c.primaryBorder}`, borderRadius: 10, padding: '7px 16px', fontSize: 12, color: c.muted, cursor: 'pointer' }}>取消</button>
                         <button onClick={handleAddComment}
-                            style={{ background: c.primary, border: 'none', borderRadius: 12, padding: '7px 18px', fontSize: 12, color: 'white', cursor: 'pointer', fontWeight: 600, opacity: commentText.trim() ? 1 : 0.5 }}>保存</button>
+                            style={{ background: c.primary, border: 'none', borderRadius: 10, padding: '7px 18px', fontSize: 12, color: 'white', cursor: 'pointer', fontWeight: 600, opacity: commentText.trim() ? 1 : 0.5 }}>保存</button>
                     </div>
-                </div>
-            )}
-
-            {/* Note popup — shows all overlapping annotations */}
-            {activeComments.length > 0 && (
-                <div onClick={(e) => e.stopPropagation()} style={{
-                    position: 'absolute', bottom: 20, left: 16, right: 16,
-                    background: 'rgba(255,255,255,0.96)', backdropFilter: 'blur(24px)',
-                    borderRadius: 20, padding: '16px 20px', border: `1px solid ${c.primaryBorder}`,
-                    boxShadow: '0 -4px 32px rgba(0,0,0,0.08)', zIndex: 20, maxHeight: '50vh', overflow: 'auto',
-                }} className="no-scrollbar">
-                    <button onClick={() => setActiveComments([])} style={{ position: 'absolute', top: 10, right: 14, background: 'none', border: 'none', fontSize: 18, color: '#ccc', cursor: 'pointer', lineHeight: 1, zIndex: 1 }}>×</button>
-                    {(() => {
-                        const topLevel = activeComments.filter(ac => !ac.reply_to);
-                        const replies = activeComments.filter(ac => ac.reply_to);
-                        const renderComment = (ac: Comment, indent: boolean) => {
-                            const isShen = ac.from_who.toLowerCase() === 'ai' || ac.from_who.toLowerCase() === aiName.toLowerCase();
-                            const color = isShen ? c.shenColor : c.tongColor;
-                            const bg = isShen ? c.shenBg : c.tongBg;
-                            return (
-                                <div key={ac.id} style={{ marginLeft: indent ? 28 : 0, marginBottom: 12, paddingBottom: 12, borderBottom: indent ? 'none' : `1px solid ${c.primaryBorder}` }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                                        <span style={{ width: 24, height: 24, borderRadius: '50%', background: bg, border: `2px solid ${color}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color }}>{displayName(ac.from_who).charAt(0)}</span>
-                                        <span style={{ fontSize: 12, fontWeight: 600, color }}>{displayName(ac.from_who)}</span>
-                                        <span style={{ fontSize: 10, color: '#ccc' }}>{ac.created_at?.slice(0, 16).replace('T', ' ')}</span>
-                                    </div>
-                                    {ac.selected_text && (
-                                        <div style={{ fontSize: 12, color: '#888', fontStyle: 'italic', padding: '8px 12px', marginBottom: 10, background: isShen ? c.shenHL : c.tongHL, borderRadius: 12, lineHeight: 1.5, borderLeft: `3px solid ${color}50` }}>
-                                            {ac.selected_text}
-                                        </div>
-                                    )}
-                                    <div style={{ fontSize: 14, color: '#333', lineHeight: 1.7, marginBottom: 8 }}>{ac.content}</div>
-                                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                                        <button onClick={() => { replyPageRef.current = page; setReplyingTo(ac); setCommentingIdx(ac.paragraph_idx); setCommentText(''); }} style={{ background: 'none', border: `1px solid ${c.primaryBorder}`, borderRadius: 10, padding: '4px 14px', fontSize: 11, color: c.primary, cursor: 'pointer' }}>回复</button>
-                                        {!isShen && (
-                                            <button onClick={() => handleDeleteComment(ac)} style={{ background: 'none', border: '1px solid #f0d0d0', borderRadius: 10, padding: '4px 14px', fontSize: 11, color: '#d88', cursor: 'pointer' }}>删除</button>
-                                        )}
-                                    </div>
-                                </div>
-                            );
-                        };
-                        const renderThread = (parent: Comment, depth: number) => (
-                            <React.Fragment key={parent.id}>
-                                {renderComment(parent, depth > 0)}
-                                {replies.filter(r => r.reply_to === parent.id).map(r => renderThread(r, depth + 1))}
-                            </React.Fragment>
-                        );
-                        return topLevel.map(ac => renderThread(ac, 0));
-                    })()}
-                    {replyingTo && (
-                        <div style={{ marginTop: 8, padding: '10px 12px', background: c.primaryBg, borderRadius: 14, border: `1px solid ${c.primaryBorder}` }}>
-                            <div style={{ fontSize: 11, color: '#999', marginBottom: 6 }}>回复 {displayName(replyingTo.from_who)}：{replyingTo.content.slice(0, 30)}{replyingTo.content.length > 30 ? '…' : ''}</div>
-                            <div style={{ display: 'flex', gap: 8 }}>
-                                <input value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="写回复…" style={{ flex: 1, border: `1px solid ${c.primaryBorder}`, borderRadius: 10, padding: '6px 12px', fontSize: 13, outline: 'none' }} onKeyDown={e => e.key === 'Enter' && handleAddComment()} />
-                                <button onClick={handleAddComment} style={{ background: c.primary, color: '#fff', border: 'none', borderRadius: 10, padding: '6px 14px', fontSize: 12, cursor: 'pointer' }}>发送</button>
-                                <button onClick={() => setReplyingTo(null)} style={{ background: 'none', border: `1px solid ${c.primaryBorder}`, borderRadius: 10, padding: '6px 10px', fontSize: 12, color: '#999', cursor: 'pointer' }}>×</button>
-                            </div>
-                        </div>
-                    )}
                 </div>
             )}
 
@@ -1888,12 +1993,12 @@ const StudyApp: React.FC = () => {
                         </div>
                     </div>
 
-                    {/* Reading settings panel — brightness, font size, night mode */}
-                    <div onClick={(e) => e.stopPropagation()} style={{
-                        position: 'absolute', bottom: showBar ? 90 : -300, left: 16, right: 16, zIndex: 20,
-                        background: readerNightMode ? 'rgba(40,40,40,0.97)' : 'rgba(255,255,255,0.97)', backdropFilter: 'blur(20px)',
-                        borderRadius: 16, padding: '18px 20px',
-                        boxShadow: '0 -4px 24px rgba(0,0,0,0.1)', border: `1px solid ${readerNightMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'}`,
+                    {/* Reading settings panel — brightness, font size, night mode, 上下文范围 */}
+                    <div onClick={(e) => e.stopPropagation()} className="no-scrollbar" style={{
+                        position: 'absolute', bottom: showBar ? 90 : -400, left: 16, right: 16, zIndex: 20,
+                        background: readerNightMode ? '#2b2924' : '#fff',
+                        borderRadius: 16, padding: '18px 20px', maxHeight: '68vh', overflowY: 'auto',
+                        boxShadow: '0 -2px 24px rgba(0,0,0,0.10)', border: `1px solid ${c.primaryBorder}`,
                         opacity: showFontPanel && showBar ? 1 : 0,
                         transform: showFontPanel && showBar ? 'translateY(0)' : 'translateY(20px)',
                         transition: 'opacity 0.25s ease, transform 0.25s ease, bottom 0.3s ease',
@@ -1928,6 +2033,44 @@ const StudyApp: React.FC = () => {
                                 style={{ flex: 1, padding: '8px 0', borderRadius: 8, border: `1.5px solid ${readerNightMode ? c.primary : 'rgba(0,0,0,0.06)'}`, background: readerNightMode ? `${c.primary}12` : 'transparent', cursor: 'pointer', fontSize: 12, color: readerNightMode ? c.primary : '#999', fontWeight: 500 }}>
                                 ☾ 夜间
                             </button>
+                        </div>
+
+                        {/* 上下文范围 — 同一个值用于「批注触发 AI」和「从选中句主动讨论」（Phase 3） */}
+                        <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${c.primaryBorder}` }}>
+                            <div style={{ fontSize: 11, color: c.muted, marginBottom: 8, letterSpacing: 0.3 }}>
+                                上下文 · ±{contextChars}字
+                            </div>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                                {CONTEXT_PRESETS.map(p => {
+                                    const on = !contextCustom && contextChars === p;
+                                    return (
+                                        <button key={p} onClick={() => { setContextCustom(false); setContextChars(p); }}
+                                            style={{ flex: 1, padding: '7px 0', borderRadius: 8, fontSize: 12, cursor: 'pointer', fontWeight: on ? 600 : 400,
+                                                border: `1.5px solid ${on ? c.primary : c.primaryBorder}`,
+                                                background: on ? `${c.primary}12` : 'transparent',
+                                                color: on ? c.primary : (readerNightMode ? '#9a938a' : '#8a8378') }}>
+                                            ±{p}
+                                        </button>
+                                    );
+                                })}
+                                <button onClick={() => setContextCustom(true)}
+                                    style={{ flex: 1, padding: '7px 0', borderRadius: 8, fontSize: 12, cursor: 'pointer', fontWeight: contextCustom ? 600 : 400,
+                                        border: `1.5px solid ${contextCustom ? c.primary : c.primaryBorder}`,
+                                        background: contextCustom ? `${c.primary}12` : 'transparent',
+                                        color: contextCustom ? c.primary : (readerNightMode ? '#9a938a' : '#8a8378') }}>
+                                    自定义
+                                </button>
+                            </div>
+                            {contextCustom && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                                    <span style={{ fontSize: 12, color: c.muted }}>±</span>
+                                    <input type="number" min={50} max={5000} step={50} value={contextChars}
+                                        onChange={e => setContextChars(parseInt(e.target.value || '0', 10))}
+                                        style={{ flex: 1, padding: '7px 10px', borderRadius: 8, border: `1px solid ${c.primaryBorder}`, fontSize: 13, outline: 'none',
+                                            background: readerNightMode ? 'rgba(255,255,255,0.06)' : '#fff', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }} />
+                                    <span style={{ fontSize: 12, color: c.muted }}>字</span>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </>

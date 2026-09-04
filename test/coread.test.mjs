@@ -165,3 +165,31 @@ test('persists progress, one bookmark, and selection/reply threads', async () =>
   assert.ok(db.pragma('table_info(book_progress)').some(column => column.name === 'char_offset'));
   db.close();
 });
+
+test('context_chars setting: default, persistence, and validation', async () => {
+  initDb(dbPath);
+
+  const initial = await request('GET', '/v1/settings');
+  assert.equal(initial.statusCode, 200);
+  assert.equal(initial.body.context_chars, 300);
+
+  const rejected = await request('PUT', '/v1/settings', { context_chars: 10 });
+  assert.equal(rejected.statusCode, 400);
+  const rejectedHigh = await request('PUT', '/v1/settings', { context_chars: 99999 });
+  assert.equal(rejectedHigh.statusCode, 400);
+  const rejectedNaN = await request('PUT', '/v1/settings', { context_chars: 'lots' });
+  assert.equal(rejectedNaN.statusCode, 400);
+
+  const saved = await request('PUT', '/v1/settings', { context_chars: 600 });
+  assert.equal(saved.statusCode, 200);
+  assert.equal(saved.body.context_chars, 600);
+
+  // Re-open the database to prove it survives a service restart.
+  initDb(dbPath);
+  const reloaded = await request('GET', '/v1/settings');
+  assert.equal(reloaded.body.context_chars, 600);
+  assert.equal(reloaded.body.settings.context_chars, '600');
+
+  const custom = await request('PUT', '/v1/settings', { context_chars: 450 });
+  assert.equal(custom.body.context_chars, 450);
+});

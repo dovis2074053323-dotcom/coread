@@ -47,6 +47,9 @@ export const api = {
   imageUrl: (bookId: number, filename: string) =>
     `${BASE}${coreadPath(`/v1/book-images/${bookId}/${filename}`)}`,
   wishlistUrl: () => `${BASE}/v1/reading-wishlist`,
+  fetchSettings: () => request('/v1/settings'),
+  updateSettings: (data: { context_chars: number }) =>
+    request('/v1/settings', { method: 'PUT', body: JSON.stringify(data) }),
   fetchBookBookmark: (bookId: number) => request(`/v1/books/${bookId}/bookmark`),
   updateBookBookmark: (bookId: number, data: { page: number; paragraph_idx: number; char_offset?: number }) =>
     request(`/v1/books/${bookId}/bookmark`, { method: 'PUT', body: JSON.stringify(data) }),
