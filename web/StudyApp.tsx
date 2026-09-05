@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, startTransition, useLayoutEffect, useMemo } from 'react';
 import { api, coreadPath } from './api';
+import { findBookById } from './open-book.js';
 
 // Morrow 暖纸主题：对齐 morrow/web tokens.css（--bg #f8f8f6 / --text #3d3929 /
 // --line #ebe7e1 / --action #bd5d3a / 衬线正文）。iframe 拿不到宿主的 CSS 变量，
@@ -250,6 +251,11 @@ const StudyApp: React.FC = () => {
 
     const [mode, setMode] = useState<'shelf' | 'reading'>('shelf');
     const [books, setBooks] = useState<Book[]>([]);
+    const booksRef = useRef<Book[]>([]);
+    const booksLoadedRef = useRef(false);
+    const pendingBookIdRef = useRef<number | null>(null);
+    const openRequestBookIdRef = useRef<number | null>(null);
+    const openBookRef = useRef<((book: Book) => Promise<void>) | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
@@ -409,6 +415,31 @@ const StudyApp: React.FC = () => {
     };
 
     useEffect(() => { loadBooks(); }, []);
+
+    useEffect(() => {
+        if (window.parent === window) return;
+        const onOpenBookMessage = (e: MessageEvent) => {
+            if (e.source !== window.parent || e.data?.type !== 'morrow-coread-open-book') return;
+            const bookId = Number(e.data.bookId);
+            if (!Number.isInteger(bookId) || bookId < 1) return;
+            if (openRequestBookIdRef.current === bookId) return;
+            openRequestBookIdRef.current = bookId;
+            if (!booksLoadedRef.current) {
+                pendingBookIdRef.current = bookId;
+                return;
+            }
+            const book = findBookById(booksRef.current, bookId) as Book | null;
+            if (book) void openBookRef.current?.(book);
+            else {
+                pendingBookIdRef.current = null;
+                setMode('shelf');
+                toast('这本书已不在书架');
+            }
+        };
+        window.addEventListener('message', onOpenBookMessage);
+        window.parent.postMessage({ type: 'morrow-coread-ready' }, '*');
+        return () => window.removeEventListener('message', onOpenBookMessage);
+    }, []);
 
     // Real-time comment sync — low-priority update, no flash
     useEffect(() => { commentsRef.current = comments; }, [comments]);
@@ -647,7 +678,23 @@ const StudyApp: React.FC = () => {
 
     const loadBooks = async () => {
         setLoading(true); setError('');
-        try { const d = await api.fetchBooks(); setBooks(d.books || []); }
+        try {
+            const d = await api.fetchBooks();
+            const latestBooks = d.books || [];
+            booksRef.current = latestBooks;
+            booksLoadedRef.current = true;
+            setBooks(latestBooks);
+            const pendingBookId = pendingBookIdRef.current;
+            if (pendingBookId != null) {
+                pendingBookIdRef.current = null;
+                const pendingBook = findBookById(latestBooks, pendingBookId) as Book | null;
+                if (pendingBook) await openBookRef.current?.(pendingBook);
+                else {
+                    setMode('shelf');
+                    toast('这本书已不在书架');
+                }
+            }
+        }
         catch (e: any) { setError(e.message); }
         setLoading(false);
     };
@@ -766,6 +813,7 @@ const StudyApp: React.FC = () => {
         } catch (e: any) { toast(`加载失败: ${e.message}`); setReadingLoading(false); }
         api.fetchBookToc(book.id).then(d => setTocChapters(d.chapters || [])).catch(() => {});
     };
+    openBookRef.current = openBook;
 
     const lockedHeightRef = useRef<number>(0);
     useLayoutEffect(() => {
