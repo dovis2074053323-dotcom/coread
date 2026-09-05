@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef, startTransition, useLayoutEffect, useMemo } from 'react';
 import { api, coreadPath } from './api';
 import { findBookById } from './open-book.js';
+import { readerPageFragments, stripReaderHeading, threadBelongsToFragment, virtualPageRange } from './reader-layout.js';
 
 // Morrow 暖纸主题：对齐 morrow/web tokens.css（--bg #f8f8f6 / --text #3d3929 /
 // --line #ebe7e1 / --action #bd5d3a / 衬线正文）。iframe 拿不到宿主的 CSS 变量，
@@ -53,6 +54,10 @@ interface Comment { id: number; book_id: number; paragraph_idx: number; sel_end_
 interface Bookmark { page: number; paragraph_idx: number; char_offset: number; created_at?: string | null; updated_at?: string | null; }
 interface PageBreak { paraIndex: number; offset: number; }
 interface PageFragment extends Paragraph { sourceIdx: number; startOffset: number; endOffset: number; isPartialStart: boolean; isPartialEnd: boolean; }
+type ReaderMode = 'paged' | 'scroll';
+type ReaderLineSpacing = 'tight' | 'normal' | 'loose';
+type ReaderMargin = 'small' | 'medium' | 'large';
+type ReaderPaper = 'warm' | 'linen' | 'sage' | 'night';
 interface CoreadBinding {
     sessionId: string | null;
     valid: boolean;
@@ -97,6 +102,28 @@ const READER_INK_NIGHT = '#dcd5c9';
 const READER_INK_NIGHT_SOFT = '#b6aea2';
 const READER_SERIF = "Georgia, 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', serif";
 const CONTEXT_PRESETS = [100, 300, 600, 1200];
+const READER_PAPERS: { id: ReaderPaper; label: string; background: string; dark: boolean }[] = [
+    { id: 'warm', label: '暖纸', background: PAPER_BG, dark: false },
+    { id: 'linen', label: '米白', background: '#f1eadc', dark: false },
+    { id: 'sage', label: '青纸', background: '#edf0eb', dark: false },
+    { id: 'night', label: '夜读', background: PAPER_BG_NIGHT, dark: true },
+];
+const READER_LINE_HEIGHTS: Record<ReaderLineSpacing, number> = { tight: 1.65, normal: 1.85, loose: 2.08 };
+const READER_SIDE_PADDINGS: Record<ReaderMargin, number> = { small: 20, medium: 28, large: 36 };
+const SCROLL_PAGE_OVERSCAN = 3;
+
+function storedChoice<T extends string>(key: string, choices: readonly T[], fallback: T): T {
+    const value = localStorage.getItem(key) as T | null;
+    return value && choices.includes(value) ? value : fallback;
+}
+
+function shadeHex(hex: string, brightness: number): string {
+    const value = hex.replace('#', '');
+    if (!/^[0-9a-f]{6}$/i.test(value)) return hex;
+    const factor = Math.max(0.3, Math.min(1, brightness / 100));
+    const channel = (offset: number) => Math.round(parseInt(value.slice(offset, offset + 2), 16) * factor).toString(16).padStart(2, '0');
+    return `#${channel(0)}${channel(2)}${channel(4)}`;
+}
 
 const STUDY_THEME_CSS = `
 .xiaowo-study {
@@ -123,7 +150,6 @@ const STUDY_THEME_CSS = `
 }
 `;
 
-const READER_PAGE_PADDING = '56px 28px calc(24px + env(safe-area-inset-bottom))';
 const READER_VERTICAL_PADDING_STATIC = 88;
 function getSafeAreaBottom(): number {
     if (typeof document === 'undefined') return 0;
@@ -134,7 +160,6 @@ function getSafeAreaBottom(): number {
     document.body.removeChild(probe);
     return h;
 }
-const READER_HORIZONTAL_PADDING = 56;
 function decodeEntities(s: string): string {
     return s.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n)).replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
@@ -207,6 +232,24 @@ const idbDel = (key: string): Promise<void> =>
             tx.onerror = () => resolve();
         } catch { resolve(); }
     }));
+const idbDelPrefix = (prefix: string): Promise<void> =>
+    idbOpen().then(db => new Promise<void>((resolve) => {
+        if (!db) return resolve();
+        try {
+            const tx = db.transaction('pagebreaks', 'readwrite');
+            const store = tx.objectStore('pagebreaks');
+            const req = store.openCursor();
+            req.onsuccess = () => {
+                const cursor = req.result;
+                if (!cursor) return;
+                if (typeof cursor.key === 'string' && cursor.key.startsWith(prefix)) cursor.delete();
+                cursor.continue();
+            };
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => resolve();
+            tx.onabort = () => resolve();
+        } catch { resolve(); }
+    }));
 const idbGetParas = (key: string): Promise<string | null> =>
     idbOpen().then(db => new Promise<string | null>((resolve) => {
         if (!db) return resolve(null);
@@ -269,6 +312,7 @@ const StudyApp: React.FC = () => {
     const [paginateProgress, setPaginateProgress] = useState<number | null>(null);
     const [pageFragments, setPageFragments] = useState<PageFragment[]>([]);
     const [readingLoading, setReadingLoading] = useState(false);
+    const rootRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const measureRef = useRef<HTMLDivElement>(null);
     const [allParas, setAllParas] = useState<Paragraph[]>([]);
@@ -283,6 +327,16 @@ const StudyApp: React.FC = () => {
     const progressWriteTailRef = useRef<Promise<unknown>>(Promise.resolve());
     const restoringProgressRef = useRef(false);
     const openGenerationRef = useRef(0);
+    const [readerShellHeight, setReaderShellHeight] = useState<number | null>(null);
+    const [keyboardInset, setKeyboardInset] = useState(0);
+    const shellViewportRef = useRef({ width: 0, height: 0 });
+    const [scrollWindow, setScrollWindow] = useState({ start: 1, end: 1 });
+    const scrollPageHeightsRef = useRef<Map<number, number>>(new Map());
+    const [scrollMetricsVersion, setScrollMetricsVersion] = useState(0);
+    const pendingScrollPageRef = useRef<number | null>(null);
+    const scrollFrameRef = useRef(0);
+    const pendingThreadRevealRef = useRef<number | null>(null);
+    const scrollProgressTimerRef = useRef<any>(null);
     // 后手优化：临时页表覆盖的段落区间（非null=全书分页仍在后台补全，窗外跳转先拦住）
     const provisionalRangeRef = useRef<{ from: number; to: number } | null>(null);
 
@@ -293,6 +347,7 @@ const StudyApp: React.FC = () => {
     // 行间批注：不再用底部弹层，改成焦点态——高亮的批注 thread 滚进视野并轻微强调。
     const [focusedThreadId, setFocusedThreadId] = useState<number | null>(null);
     const [replyingTo, setReplyingTo] = useState<Comment | null>(null);
+    const commentEditorRef = useRef<HTMLTextAreaElement>(null);
     const [newReplies, setNewReplies] = useState<ReplyNotice[]>([]);
     const [showReplies, setShowReplies] = useState(false);
     const [returnPoint, setReturnPoint] = useState<{ page: number; paraIdx: number | null } | null>(null);
@@ -392,8 +447,22 @@ const StudyApp: React.FC = () => {
     const [showFontPanel, setShowFontPanel] = useState(false);
     const [showBookmarkMenu, setShowBookmarkMenu] = useState(false);
     const [showMoreMenu, setShowMoreMenu] = useState(false);
-    const [readerBrightness, setReaderBrightness] = useState(() => parseInt(localStorage.getItem('coread-brightness') || '100', 10));
-    const [readerNightMode, setReaderNightMode] = useState(() => localStorage.getItem('coread-night-mode') === 'true');
+    const [readerBrightness, setReaderBrightness] = useState(() => Math.max(30, Math.min(100, parseInt(localStorage.getItem('coread-brightness') || '100', 10) || 100)));
+    const [readerMode, setReaderMode] = useState<ReaderMode>(() => storedChoice('coread-reader-mode', ['paged', 'scroll'] as const, 'paged'));
+    const [readerLineSpacing, setReaderLineSpacing] = useState<ReaderLineSpacing>(() => storedChoice('coread-line-spacing', ['tight', 'normal', 'loose'] as const, 'normal'));
+    const [readerMargin, setReaderMargin] = useState<ReaderMargin>(() => storedChoice('coread-page-margin', ['small', 'medium', 'large'] as const, 'medium'));
+    const [readerPaperId, setReaderPaperId] = useState<ReaderPaper>(() => {
+        const migrated = localStorage.getItem('coread-night-mode') === 'true' ? 'night' : 'warm';
+        return storedChoice('coread-paper', ['warm', 'linen', 'sage', 'night'] as const, migrated);
+    });
+    const readerPaper = READER_PAPERS.find(option => option.id === readerPaperId) || READER_PAPERS[0];
+    const readerNightMode = readerPaper.dark;
+    const readerBackground = readerPaper.background;
+    const readerDisplayBackground = shadeHex(readerBackground, readerBrightness);
+    const readerLineHeight = READER_LINE_HEIGHTS[readerLineSpacing];
+    const readerChapterLineHeight = readerLineHeight + 0.35;
+    const readerSidePadding = READER_SIDE_PADDINGS[readerMargin];
+    const readerHorizontalPadding = readerSidePadding * 2;
     const displayName = (from: string) => {
         const lower = from.toLowerCase();
         if (lower === 'human' || lower === humanName.toLowerCase()) return humanName;
@@ -414,7 +483,7 @@ const StudyApp: React.FC = () => {
         });
     };
 
-    useEffect(() => { loadBooks(); }, []);
+    useEffect(() => { void loadBooks(true); }, []);
 
     useEffect(() => {
         if (window.parent === window) return;
@@ -564,6 +633,15 @@ const StudyApp: React.FC = () => {
         return false;
     };
 
+    const navigateToPage = (targetPage: number, alignScroll = true) => {
+        const next = Math.max(1, Math.min(totalPages, targetPage));
+        if (readerMode === 'scroll' && alignScroll) {
+            setScrollWindow(virtualPageRange(next, totalPages, SCROLL_PAGE_OVERSCAN));
+            pendingScrollPageRef.current = next;
+        }
+        setPage(next);
+    };
+
     const resolveNoticeTarget = (notice: ReplyNotice, pool: Comment[]) => {
         const existing = pool.find(c => c.id === notice.id);
         const replyTo = notice.reply_to ?? notice.parent_id ?? existing?.reply_to ?? null;
@@ -590,7 +668,7 @@ const StudyApp: React.FC = () => {
         setShowReplies(false);
         setShowBar(false);
         const targetPage = returnPoint.paraIdx != null ? findPageForParaIdx(returnPoint.paraIdx) : -1;
-        setPage(targetPage >= 0 ? targetPage + 1 : Math.max(1, Math.min(totalPages, returnPoint.page)));
+        navigateToPage(targetPage >= 0 ? targetPage + 1 : Math.max(1, Math.min(totalPages, returnPoint.page)));
         setReturnPoint(null);
     };
 
@@ -601,7 +679,7 @@ const StudyApp: React.FC = () => {
         const pool = Array.from(new Map([...allCommentsRef.current, ...commentsRef.current].map(c => [c.id, c])).values());
         const { existing, replyTo, parent, paraIdx: targetParaIdx, offset: targetOffset } = resolveNoticeTarget(notice, pool);
         const targetPage = findPageForParaIdx(targetParaIdx, totalPages, targetOffset);
-        if (targetPage >= 0) setPage(targetPage + 1);
+        if (targetPage >= 0) navigateToPage(targetPage + 1);
         if (!existing) {
             const noticeComment: Comment = {
                 id: notice.id,
@@ -619,8 +697,11 @@ const StudyApp: React.FC = () => {
             setComments(prev => prev.some(c => c.id === noticeComment.id) ? prev : [...prev, noticeComment]);
             setAllComments(prev => prev.some(c => c.id === noticeComment.id) ? prev : [...prev, noticeComment]);
         }
-        // 焦点落在 thread 顶层：行间 thread 会滚进视野并轻微强调。
-        setFocusedThreadId((parent?.id ?? replyTo) ?? notice.id);
+        // 只有从通知显式跳转时才定位 thread；输入框聚焦和批注保存不会再
+        // 触发全局 scrollIntoView，避免与 Android 键盘的 viewport 调整叠加。
+        const threadId = (parent?.id ?? replyTo) ?? notice.id;
+        pendingThreadRevealRef.current = threadId;
+        setFocusedThreadId(threadId);
     };
 
     // Selection change listener for floating annotation bar
@@ -666,18 +747,27 @@ const StudyApp: React.FC = () => {
         return () => document.removeEventListener('selectionchange', handler);
     }, [mode]);
 
-    // 焦点批注：把对应的行间 thread 滚进视野中央（阅读区现在可纵向滚动，容得下页边批注）。
-    useEffect(() => {
-        if (focusedThreadId == null || mode !== 'reading') return;
-        const t = setTimeout(() => {
-            const el = contentRef.current?.querySelector(`[data-thread-anchor="${focusedThreadId}"]`);
-            (el as HTMLElement | null)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        }, 60);
-        return () => clearTimeout(t);
-    }, [focusedThreadId, mode, page, pageFragments]);
+    // Explicit annotation navigation is contained to the reader's own scroller.
+    // It runs in layout, without smooth animation, and never reacts to keyboard
+    // focus or to saving a comment.
+    useLayoutEffect(() => {
+        const threadId = pendingThreadRevealRef.current;
+        const container = contentRef.current;
+        if (threadId == null || mode !== 'reading' || !container) return;
+        const target = container.querySelector(`[data-thread-anchor="${threadId}"]`) as HTMLElement | null;
+        if (!target) return;
+        const containerRect = container.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        if (targetRect.top < containerRect.top + 24 || targetRect.bottom > containerRect.bottom - 24) {
+            const centeredTop = targetRect.top - containerRect.top - (containerRect.height - targetRect.height) / 2;
+            container.scrollTop += centeredTop;
+        }
+        pendingThreadRevealRef.current = null;
+    }, [focusedThreadId, mode, page, pageFragments, scrollWindow]);
 
-    const loadBooks = async () => {
-        setLoading(true); setError('');
+    const loadBooks = async (blocking = !booksLoadedRef.current) => {
+        if (blocking) setLoading(true);
+        setError('');
         try {
             const d = await api.fetchBooks();
             const latestBooks = d.books || [];
@@ -695,8 +785,10 @@ const StudyApp: React.FC = () => {
                 }
             }
         }
-        catch (e: any) { setError(e.message); }
-        setLoading(false);
+        catch (e: any) {
+            if (blocking || booksRef.current.length === 0) setError(e.message);
+        }
+        if (blocking) setLoading(false);
     };
 
     const openBook = async (book: Book) => {
@@ -815,38 +907,79 @@ const StudyApp: React.FC = () => {
     };
     openBookRef.current = openBook;
 
+    // Morrow deliberately resizes its layout viewport for the chat composer when
+    // the Android keyboard opens. Inside Palimpsest we keep the reading paper at
+    // its pre-keyboard height and expose only the obscured bottom inset to the
+    // detached annotation editor. The iframe viewport clips the paper; it never
+    // participates in reflow or pagination while typing.
+    useLayoutEffect(() => {
+        if (mode !== 'reading' || !rootRef.current) {
+            shellViewportRef.current = { width: 0, height: 0 };
+            setReaderShellHeight(null);
+            setKeyboardInset(0);
+            return;
+        }
+        const root = rootRef.current;
+        const viewport = window.visualViewport;
+        const readVisibleHeight = () => Math.round(Math.min(
+            window.innerHeight,
+            viewport ? viewport.offsetTop + viewport.height : window.innerHeight,
+        ));
+        const lockCurrentViewport = () => {
+            const width = Math.round(window.innerWidth || root.clientWidth);
+            const height = Math.round(root.getBoundingClientRect().height || window.innerHeight);
+            shellViewportRef.current = { width, height };
+            setReaderShellHeight(height);
+            setKeyboardInset(0);
+        };
+        lockCurrentViewport();
+
+        const onViewportChange = () => {
+            const width = Math.round(window.innerWidth || root.clientWidth);
+            const locked = shellViewportRef.current;
+            if (!locked.height || Math.abs(width - locked.width) > 2) {
+                const height = readVisibleHeight();
+                shellViewportRef.current = { width, height };
+                setReaderShellHeight(height);
+                setKeyboardInset(0);
+                return;
+            }
+            setKeyboardInset(Math.max(0, locked.height - readVisibleHeight()));
+        };
+        window.addEventListener('resize', onViewportChange);
+        viewport?.addEventListener('resize', onViewportChange);
+        viewport?.addEventListener('scroll', onViewportChange);
+        return () => {
+            window.removeEventListener('resize', onViewportChange);
+            viewport?.removeEventListener('resize', onViewportChange);
+            viewport?.removeEventListener('scroll', onViewportChange);
+        };
+    }, [mode]);
+
     const lockedHeightRef = useRef<number>(0);
+    const lockedWidthRef = useRef<number>(0);
     useLayoutEffect(() => {
         if (mode !== 'reading' || !contentRef.current) return;
         const el = contentRef.current;
         let frame = 0;
-        const update = (force?: boolean) => {
+        const update = (initial = false) => {
             cancelAnimationFrame(frame);
             frame = requestAnimationFrame(() => {
                 const width = Math.round(el.clientWidth);
-                const rawH = Math.min(el.clientHeight, window.innerHeight);
-                const height = Math.max(0, Math.round(rawH - READER_VERTICAL_PADDING_STATIC - getSafeAreaBottom()));
-                if (lockedHeightRef.current === 0 || force) {
+                const height = Math.max(0, Math.round(el.clientHeight - READER_VERTICAL_PADDING_STATIC - getSafeAreaBottom()));
+                const widthChanged = Math.abs(width - lockedWidthRef.current) > 2;
+                if (lockedHeightRef.current === 0 || initial || widthChanged) {
                     lockedHeightRef.current = height;
+                    lockedWidthRef.current = width;
                 }
-                const stableH = Math.max(height, lockedHeightRef.current);
                 setReaderSize(prev => {
-                    if (prev.width === width && prev.height === stableH) return prev;
-                    return { width, height: stableH };
+                    if (prev.width === width && prev.height === lockedHeightRef.current) return prev;
+                    return { width, height: lockedHeightRef.current };
                 });
             });
         };
         update(true);
-        const onResize = () => {
-            const rawH = Math.min(el.clientHeight, window.innerHeight);
-            const h = Math.max(0, Math.round(rawH - READER_VERTICAL_PADDING_STATIC - getSafeAreaBottom()));
-            if (h >= lockedHeightRef.current * 0.95) {
-                update(true);
-            } else {
-                const width = Math.round(el.clientWidth);
-                setReaderSize(prev => prev.width === width ? prev : { width, height: prev.height });
-            }
-        };
+        const onResize = () => update(false);
         const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => onResize()) : null;
         ro?.observe(el);
         window.addEventListener('resize', onResize);
@@ -855,15 +988,18 @@ const StudyApp: React.FC = () => {
             ro?.disconnect();
             window.removeEventListener('resize', onResize);
             lockedHeightRef.current = 0;
+            lockedWidthRef.current = 0;
         };
     }, [mode]);
 
-    const readerContentWidth = Math.max(1, readerSize.width - READER_HORIZONTAL_PADDING);
+    const readerContentWidth = Math.max(1, readerSize.width - readerHorizontalPadding);
 
     // 同书只存一份分页缓存，value里带测量时的尺寸，读取时容差校验。
     // 不能把精确像素拼进key：手机WebView每次打开视口差±几px，key永远miss，导致每次进书全书重新measure。
-    // v3：正文换成衬线体，旧的（无衬线测量的）分页缓存必须失效重算。
-    const paginationCacheKey = activeBook ? `pagebreaks-v3-${activeBook.id}-fs${readerFontSize}` : '';
+    // v4：所有影响断行/页高的阅读配置都进入签名。背景和阅读方式不影响
+    // page breaks，因此不应制造无意义的缓存副本。
+    const paginationLayoutSignature = `fs${readerFontSize}-lh${readerLineSpacing}-mg${readerMargin}`;
+    const paginationCacheKey = activeBook ? `pagebreaks-v4-${activeBook.id}-${paginationLayoutSignature}` : '';
     const imgHeightCache = useRef<Map<string, number>>(new Map());
 
     const buildMeasureBlock = (para: Paragraph, sourceIdx: number, start: number, end: number) => {
@@ -883,11 +1019,11 @@ const StudyApp: React.FC = () => {
             imgEl.style.width = '100%';
             outer.appendChild(imgEl);
         } else {
-            const displayText = stripHeading(para.content).slice(start, end);
+            const displayText = stripReaderHeading(para.content).slice(start, end);
             const inner = document.createElement('div');
             inner.textContent = displayText || ' ';
             inner.style.fontSize = `${chapterTitle ? readerFontSize + 4 : para.content.trim().startsWith('# ') ? readerFontSize + 3 : para.content.trim().startsWith('## ') ? readerFontSize + 2 : readerFontSize}px`;
-            inner.style.lineHeight = String(chapterTitle ? 2.2 : 1.85);
+            inner.style.lineHeight = String(chapterTitle ? readerChapterLineHeight : readerLineHeight);
             inner.style.letterSpacing = `${chapterTitle ? 1 : 0.3}px`;
             inner.style.textIndent = heading || chapterTitle || start > 0 ? '0' : '1.5em';
             inner.style.fontWeight = String(chapterTitle ? 800 : heading ? 700 : 400);
@@ -957,12 +1093,12 @@ const StudyApp: React.FC = () => {
                         if (cached) idbSet(paginationCacheKey, cached);
                     }
                     if (cached) {
-                        const { breaks: cachedBreaks, paraCount, width: cw, height: ch } = JSON.parse(cached);
+                        const { breaks: cachedBreaks, paraCount, width: cw, height: ch, layoutSignature } = JSON.parse(cached);
                         // 尺寸容差：宽±2px严格（影响断行）；高±80px宽松——高度只影响每页容量/页尾留白，
                         // 大书重测要约1分钟，手机WebView每次打开视口抖几十px不该触发重分页
                         const sizeOk = typeof cw === 'number' && typeof ch === 'number'
                             && Math.abs(cw - readerContentWidth) <= 2 && Math.abs(ch - readerSize.height) <= 80;
-                        if (sizeOk && paraCount === allParas.length && Array.isArray(cachedBreaks) && cachedBreaks.length > 0) {
+                        if (sizeOk && layoutSignature === paginationLayoutSignature && paraCount === allParas.length && Array.isArray(cachedBreaks) && cachedBreaks.length > 0) {
                             setPageBreaks(cachedBreaks);
                             setTotalPages(Math.max(1, cachedBreaks.length));
                             if (!suppressPageJumpRef.current) {
@@ -1012,13 +1148,13 @@ const StudyApp: React.FC = () => {
                 measurer.innerHTML = '';
                 blocks = [];
                 if (anchorIdx != null && anchorIdx >= 0 && anchorIdx < from) {
-                    const t0 = stripHeading(allParas[anchorIdx].content);
+                    const t0 = stripReaderHeading(allParas[anchorIdx].content);
                     blocks.push(buildMeasureBlock(allParas[anchorIdx], anchorIdx, 0, t0.length));
                 }
                 blockOffset = blocks.length;
                 const to = Math.min(allParas.length, from + MEASURE_CHUNK);
                 for (let i = from; i < to; i++) {
-                    const t = stripHeading(allParas[i].content);
+                    const t = stripReaderHeading(allParas[i].content);
                     blocks.push(buildMeasureBlock(allParas[i], i, 0, t.length));
                 }
                 for (const b of blocks) measurer.appendChild(b);
@@ -1172,13 +1308,13 @@ const StudyApp: React.FC = () => {
             if (paginationCacheKey) {
                 const payload = JSON.stringify({
                     breaks, paraCount: allParas.length,
-                    width: readerContentWidth, height: readerSize.height,
+                    width: readerContentWidth, height: readerSize.height, layoutSignature: paginationLayoutSignature,
                 });
                 // 清掉旧版精确像素key（pagebreaks-id-w-h），防localStorage堆积
                 try {
                     for (let i = localStorage.length - 1; i >= 0; i--) {
                         const k = localStorage.key(i);
-                        if (k && k.startsWith('pagebreaks-') && !k.startsWith('pagebreaks-v3-')) localStorage.removeItem(k);
+                        if (k && k.startsWith('pagebreaks-') && !k.startsWith('pagebreaks-v4-')) localStorage.removeItem(k);
                     }
                 } catch {}
                 // 主存 IndexedDB（配额足够，大书几百KB没问题）；写成功后清掉 localStorage 旧副本释放配额
@@ -1195,7 +1331,7 @@ const StudyApp: React.FC = () => {
                         try {
                             for (let i = localStorage.length - 1; i >= 0; i--) {
                                 const k = localStorage.key(i);
-                                if (k && k.startsWith('pagebreaks-v3-') && k !== paginationCacheKey) localStorage.removeItem(k);
+                                if (k && k.startsWith('pagebreaks-v4-') && k !== paginationCacheKey) localStorage.removeItem(k);
                             }
                             localStorage.setItem(paginationCacheKey, payload);
                         } catch {}
@@ -1218,7 +1354,7 @@ const StudyApp: React.FC = () => {
         };
         run();
         return () => { cancelled = true; };
-    }, [mode, allParas, readerContentWidth, readerSize.height, readerFontSize]);
+    }, [mode, allParas, readerContentWidth, readerSize.height, readerFontSize, readerLineSpacing, readerMargin]);
 
     useEffect(() => {
         if (allParas.length === 0 || pageBreaks.length === 0) {
@@ -1233,17 +1369,7 @@ const StudyApp: React.FC = () => {
             return;
         }
         const start = pageBreaks[page - 1] || { paraIndex: 0, offset: 0 };
-        const end = page < pageBreaks.length ? pageBreaks[page] : { paraIndex: allParas.length, offset: 0 };
-        const fragments: PageFragment[] = [];
-        for (let i = start.paraIndex; i < end.paraIndex || (i === end.paraIndex && end.offset > 0); i++) {
-            const para = allParas[i];
-            if (!para) continue;
-            const text = stripHeading(para.content);
-            const from = i === start.paraIndex ? start.offset : 0;
-            const to = i === end.paraIndex ? end.offset : text.length;
-            if (to <= from) continue;
-            fragments.push({ ...para, content: text.slice(from, to), sourceIdx: i, startOffset: from, endOffset: to, isPartialStart: from > 0, isPartialEnd: to < text.length });
-        }
+        const fragments = readerPageFragments(allParas, pageBreaks, page) as PageFragment[];
         setPageFragments(fragments);
         const visibleParas = fragments.map(f => allParas[f.sourceIdx]).filter(Boolean);
         setParagraphs(visibleParas);
@@ -1257,16 +1383,106 @@ const StudyApp: React.FC = () => {
             charOffset,
         };
         if (activeBook && visibleParas.length > 0 && !restoringProgressRef.current) {
-            persistProgressPosition(activeBook.id, currentPositionRef.current);
+            if (readerMode === 'scroll') {
+                if (scrollProgressTimerRef.current) clearTimeout(scrollProgressTimerRef.current);
+                scrollProgressTimerRef.current = setTimeout(() => {
+                    persistProgressPosition(activeBook.id, currentPositionRef.current);
+                }, 280);
+            } else {
+                persistProgressPosition(activeBook.id, currentPositionRef.current);
+            }
         }
-    }, [page, pageBreaks, allParas, allComments, activeBook?.id]);
+        return () => {
+            if (scrollProgressTimerRef.current) clearTimeout(scrollProgressTimerRef.current);
+        };
+    }, [page, pageBreaks, allParas, allComments, activeBook?.id, readerMode]);
+
+    const estimatedScrollPageHeight = Math.max(320, readerSize.height + 24);
+    const scrollPageOffsets = useMemo(() => {
+        const offsets = new Float64Array(Math.max(1, totalPages) + 1);
+        for (let pageNumber = 1; pageNumber <= totalPages; pageNumber++) {
+            offsets[pageNumber] = offsets[pageNumber - 1]
+                + (scrollPageHeightsRef.current.get(pageNumber) || estimatedScrollPageHeight);
+        }
+        return offsets;
+    }, [totalPages, estimatedScrollPageHeight, scrollMetricsVersion]);
+
+    const measureVisibleScrollPages = () => {
+        if (readerMode !== 'scroll' || !contentRef.current) return;
+        let changed = false;
+        contentRef.current.querySelectorAll<HTMLElement>('[data-scroll-page]').forEach(node => {
+            const pageNumber = Number(node.dataset.scrollPage);
+            const height = Math.max(1, Math.round(node.getBoundingClientRect().height));
+            if (Number.isSafeInteger(pageNumber) && Math.abs((scrollPageHeightsRef.current.get(pageNumber) || 0) - height) > 1) {
+                scrollPageHeightsRef.current.set(pageNumber, height);
+                changed = true;
+            }
+        });
+        if (changed) setScrollMetricsVersion(version => version + 1);
+    };
+
+    useLayoutEffect(() => {
+        scrollPageHeightsRef.current.clear();
+        setScrollMetricsVersion(version => version + 1);
+        if (readerMode === 'scroll') {
+            setScrollWindow(virtualPageRange(page, totalPages, SCROLL_PAGE_OVERSCAN));
+            pendingScrollPageRef.current = page;
+        } else if (contentRef.current) {
+            contentRef.current.scrollTop = 0;
+        }
+    }, [pageBreaks, readerMode, readerSize.width, readerSize.height]);
+
+    useLayoutEffect(() => {
+        if (readerMode !== 'scroll') return;
+        measureVisibleScrollPages();
+    }, [readerMode, scrollWindow, allComments, readerFontSize, readerLineSpacing, readerMargin]);
+
+    useLayoutEffect(() => {
+        if (readerMode !== 'scroll' || readingLoading || !contentRef.current) return;
+        const targetPage = pendingScrollPageRef.current;
+        if (targetPage == null) return;
+        if (targetPage < scrollWindow.start || targetPage > scrollWindow.end) {
+            setScrollWindow(virtualPageRange(targetPage, totalPages, SCROLL_PAGE_OVERSCAN));
+            return;
+        }
+        const target = contentRef.current.querySelector<HTMLElement>(`[data-scroll-page="${targetPage}"]`);
+        if (!target) return;
+        const containerRect = contentRef.current.getBoundingClientRect();
+        contentRef.current.scrollTop += target.getBoundingClientRect().top - containerRect.top;
+        pendingScrollPageRef.current = null;
+    }, [readerMode, readingLoading, page, totalPages, scrollWindow, pageBreaks]);
+
+    const handleReaderScroll = () => {
+        if (readerMode !== 'scroll' || !contentRef.current || pendingScrollPageRef.current != null) return;
+        cancelAnimationFrame(scrollFrameRef.current);
+        scrollFrameRef.current = requestAnimationFrame(() => {
+            const container = contentRef.current;
+            if (!container) return;
+            measureVisibleScrollPages();
+            const marker = container.getBoundingClientRect().top + 48;
+            const nodes = Array.from(container.querySelectorAll<HTMLElement>('[data-scroll-page]'));
+            let visiblePage = Number(nodes[0]?.dataset.scrollPage) || page;
+            for (const node of nodes) {
+                if (node.getBoundingClientRect().top <= marker) visiblePage = Number(node.dataset.scrollPage) || visiblePage;
+                else break;
+            }
+            visiblePage = Math.max(1, Math.min(totalPages, visiblePage));
+            if (visiblePage !== page) setPage(visiblePage);
+            if ((visiblePage >= scrollWindow.end - 1 && scrollWindow.end < totalPages)
+                || (visiblePage <= scrollWindow.start + 1 && scrollWindow.start > 1)) {
+                setScrollWindow(virtualPageRange(visiblePage, totalPages, SCROLL_PAGE_OVERSCAN));
+            }
+        });
+    };
+
+    useEffect(() => () => cancelAnimationFrame(scrollFrameRef.current), []);
 
     const goPage = (delta: number) => {
         if (!activeBook) return;
         const next = Math.max(1, Math.min(totalPages, page + delta));
         if (next !== page) {
             setFocusedThreadId(null); setReplyingTo(null); setCommentingIdx(null); setSelRange(null); setFloatingBar(null);
-            setPage(next);
+            navigateToPage(next);
             if (next === totalPages && totalPages > 1) {
                 const bookTitle = activeBook.title?.replace(/\s*\(.*?\)\s*/g, '').trim();
                 fetch('/v1/reading-wishlist').then(r => r.json()).then(res => {
@@ -1291,6 +1507,11 @@ const StudyApp: React.FC = () => {
         setFloatingBar(null);
         window.getSelection()?.removeAllRanges();
     };
+
+    useLayoutEffect(() => {
+        if (commentingIdx === null || mode !== 'reading') return;
+        commentEditorRef.current?.focus({ preventScroll: true });
+    }, [commentingIdx, replyingTo?.id, mode]);
 
     const handleAddComment = async () => {
         if (!activeBook || commentingIdx === null || !commentText.trim()) return;
@@ -1367,13 +1588,45 @@ const StudyApp: React.FC = () => {
         setCommentingIdx(null);
         setSelRange(null);
         setFloatingBar(null);
-        setPage(targetPage >= 0 ? targetPage + 1 : Math.max(1, Math.min(totalPages, bookmark.page)));
+        navigateToPage(targetPage >= 0 ? targetPage + 1 : Math.max(1, Math.min(totalPages, bookmark.page)));
     };
 
     // 三个底栏弹层（书签菜单 / 字体面板 / 更多菜单）互斥，开一个收另外两个
     const toggleBookmarkMenu = () => { setShowBookmarkMenu(v => !v); setShowMoreMenu(false); setShowFontPanel(false); };
     const toggleFontPanel = () => { setShowFontPanel(v => !v); setShowBookmarkMenu(false); setShowMoreMenu(false); };
     const toggleMoreMenu = () => { setShowMoreMenu(v => !v); setShowBookmarkMenu(false); setShowFontPanel(false); };
+
+    const preserveLayoutAnchor = () => {
+        const position = currentReaderPosition();
+        currentPositionRef.current = position;
+        currentParaIdxRef.current = position.paragraphIdx;
+    };
+    const changeReaderFontSize = (value: number) => {
+        preserveLayoutAnchor();
+        const next = Math.max(12, Math.min(22, Math.round(value)));
+        setReaderFontSize(next);
+        localStorage.setItem('coread-font-size', String(next));
+    };
+    const changeReaderMode = (value: ReaderMode) => {
+        preserveLayoutAnchor();
+        setReaderMode(value);
+        localStorage.setItem('coread-reader-mode', value);
+    };
+    const changeLineSpacing = (value: ReaderLineSpacing) => {
+        preserveLayoutAnchor();
+        setReaderLineSpacing(value);
+        localStorage.setItem('coread-line-spacing', value);
+    };
+    const changePageMargin = (value: ReaderMargin) => {
+        preserveLayoutAnchor();
+        setReaderMargin(value);
+        localStorage.setItem('coread-page-margin', value);
+    };
+    const changeReaderPaper = (value: ReaderPaper) => {
+        setReaderPaperId(value);
+        localStorage.setItem('coread-paper', value);
+        localStorage.setItem('coread-night-mode', String(value === 'night'));
+    };
 
     const handleExport = (format: 'epub' | 'md' | 'annotations-md') => {
         if (!activeBook) return;
@@ -1387,7 +1640,7 @@ const StudyApp: React.FC = () => {
         if (!canJumpToPara(targetIdx)) return;
         setShowToc(false); setFocusedThreadId(null); setCommentingIdx(null); setSelRange(null); setFloatingBar(null);
         const targetPage = findPageForParaIdx(targetIdx);
-        if (targetPage >= 0) setPage(targetPage + 1);
+        if (targetPage >= 0) navigateToPage(targetPage + 1);
     };
 
     // 当前阅读位置所在章：最后一个起始页不超过当前页的章（目录要能定位当前章，不用从头划）
@@ -1474,7 +1727,7 @@ const StudyApp: React.FC = () => {
         toast(fail ? `完成：${ok}成功，${fail}失败` : `全部${ok}本上传成功`);
         setUploading(false);
         setShowUpload(false);
-        loadBooks();
+        void loadBooks(false);
         e.target.value = '';
     };
 
@@ -1490,7 +1743,7 @@ const StudyApp: React.FC = () => {
             await api.createBook(payload);
             setShowUpload(false); setUploadTitle(''); setUploadText(''); setPdfBase64(''); setUploadFileName('');
             toast('上传成功');
-            loadBooks();
+            void loadBooks(false);
         } catch (e: any) { toast(`上传失败: ${e.message}`); }
         setUploading(false);
     };
@@ -1500,16 +1753,23 @@ const StudyApp: React.FC = () => {
         setMode('shelf'); setActiveBook(null); setParagraphs([]); setComments([]);
         setFocusedThreadId(null); setReplyingTo(null); setCommentingIdx(null); setSelRange(null); setFloatingBar(null); setShowToc(false); setTocChapters([]);
         setBookmark(null); setReturnPoint(null);
-        Promise.resolve(pending).finally(() => loadBooks());
+        Promise.resolve(pending).finally(() => { void loadBooks(false); });
     };
 
     // Morrow 外层有自己的 Page 头部返回箭头，不知道这里还分书架/阅读两层——
     // 把当前层级汇报给它，它才能在阅读中先退回书架，而不是直接把整个页面关掉。
     useEffect(() => {
         if (window.parent !== window) {
-            window.parent.postMessage({ type: 'morrow-coread-mode', mode }, '*');
+            window.parent.postMessage({
+                type: 'morrow-coread-mode',
+                mode,
+                background: mode === 'reading' ? readerDisplayBackground : null,
+                colorScheme: mode === 'reading' && readerNightMode ? 'dark' : 'light',
+            }, '*');
         }
-    }, [mode]);
+        const themeMeta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+        if (themeMeta) themeMeta.content = mode === 'reading' ? readerDisplayBackground : '#f8f8f6';
+    }, [mode, readerDisplayBackground, readerNightMode]);
     useEffect(() => {
         if (window.parent === window) return;
         const onParentMessage = (e: MessageEvent) => {
@@ -1525,11 +1785,10 @@ const StudyApp: React.FC = () => {
         const endPara = x.sel_end_para_idx ?? x.paragraph_idx;
         return x.paragraph_idx <= idx && idx <= endPara;
     });
-    const stripHeading = (s: string) => s.replace(/^#+\s*/, '');
     const isHeading = (s: string) => s.trim().startsWith('#');
     const isChapterStart = (s: string) => {
         const trimmed = s.trim();
-        const plain = stripHeading(trimmed).trim();
+        const plain = stripReaderHeading(trimmed).trim();
         const isChapter = /^(chapter|book|part|volume|prologue|epilogue)\b/i.test(plain)
             || /^\u7b2c[\d\s\w\u4e00-\u9fff]{1,20}[\u7ae0\u8282\u5377\u90e8\u7bc7\u56de]/.test(plain)
             || /^\u7b2c\d+\u7ae0/.test(trimmed);
@@ -1568,7 +1827,11 @@ const StudyApp: React.FC = () => {
                             return xs < hEnd && xe > hStart;
                         });
                         const top = hit ? (hit.reply_to ?? hit.id) : null;
-                        setFocusedThreadId(prev => prev === top ? null : top);
+                        setFocusedThreadId(prev => {
+                            const next = prev === top ? null : top;
+                            if (next != null) pendingThreadRevealRef.current = next;
+                            return next;
+                        });
                     }}
                     style={{
                         backgroundImage: `linear-gradient(${hlBg}, ${hlBg})`,
@@ -1636,24 +1899,21 @@ const StudyApp: React.FC = () => {
                     )}
                     <div style={{ fontSize: Math.max(12, readerFontSize - 1), lineHeight: 1.7, color: nightBody, fontFamily: READER_SERIF, whiteSpace: 'pre-wrap' }}>{cmt.content}</div>
                     <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
-                        <button onClick={(e) => { e.stopPropagation(); replyPageRef.current = page; setReplyingTo(cmt); setCommentingIdx(cmt.paragraph_idx); setCommentText(''); }}
+                        <button onClick={(e) => {
+                            e.stopPropagation();
+                            replyPageRef.current = page;
+                            setReplyingTo(cmt);
+                            setCommentingIdx(cmt.paragraph_idx);
+                            setCommentText('');
+                            setSelectedText('');
+                            setSelRange(null);
+                        }}
                             style={{ background: 'none', border: 'none', padding: 0, fontSize: 11, color: c.muted, cursor: 'pointer' }}>回应</button>
                         {!isShen && (
                             <button onClick={(e) => { e.stopPropagation(); handleDeleteComment(cmt); }}
                                 style={{ background: 'none', border: 'none', padding: 0, fontSize: 11, color: c.muted, cursor: 'pointer' }}>删除</button>
                         )}
                     </div>
-                    {replyingTo?.id === cmt.id && (
-                        <div style={{ display: 'flex', gap: 6, marginTop: 6 }} onClick={(e) => e.stopPropagation()}>
-                            <input autoFocus value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="写回应…"
-                                onKeyDown={e => { if (e.key === 'Enter') handleAddComment(); }}
-                                style={{ flex: 1, border: `1px solid ${c.primaryBorder}`, borderRadius: 8, padding: '5px 10px', fontSize: 12, outline: 'none', background: readerNightMode ? 'rgba(255,255,255,0.06)' : '#fff', color: nightBody }} />
-                            <button onClick={handleAddComment} disabled={!commentText.trim()} aria-label="发送回应" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: 28, height: 28, background: c.primary, border: 'none', borderRadius: '50%', cursor: commentText.trim() ? 'pointer' : 'default', opacity: commentText.trim() ? 1 : 0.5 }}>
-                                <SendIcon color="#fff" size={13} />
-                            </button>
-                            <button onClick={() => { setReplyingTo(null); setCommentText(''); }} style={{ background: 'none', border: 'none', padding: '5px 6px', fontSize: 14, color: c.muted, cursor: 'pointer', flexShrink: 0 }}>×</button>
-                        </div>
-                    )}
                     {kids(cmt.id).map(k => note(k, depth + 1))}
                 </div>
             );
@@ -1671,6 +1931,61 @@ const StudyApp: React.FC = () => {
             </div>
         );
     };
+
+    const renderFragments = (fragments: PageFragment[], seenThreadIds: Set<number>) => fragments.map((frag, visibleIndex) => {
+        const original = allParas[frag.sourceIdx] || frag;
+        const heading = isHeading(original.content) && !frag.isPartialStart;
+        const chapterTitle = isChapterStart(original.content) && !frag.isPartialStart;
+        const rawInline = commentsForPara(frag.idx).filter(x => x.sel_start_idx != null && x.sel_end_idx != null);
+        const inlineComments = rawInline.map(h => {
+            const endPara = h.sel_end_para_idx ?? h.paragraph_idx;
+            let start = h.sel_start_idx!;
+            let end = h.sel_end_idx!;
+            if (h.paragraph_idx === frag.idx && endPara === frag.idx) { /* single paragraph */ }
+            else if (h.paragraph_idx === frag.idx) end = frag.endOffset;
+            else if (endPara === frag.idx) start = frag.startOffset;
+            else { start = frag.startOffset; end = frag.endOffset; }
+            return { ...h, sel_start_idx: start - frag.startOffset, sel_end_idx: end - frag.startOffset };
+        }).filter(h => h.sel_end_idx! > 0 && h.sel_start_idx! < frag.content.length);
+
+        const fragThreads = commentsForPara(frag.idx).filter(comment =>
+            !comment.reply_to
+            && !seenThreadIds.has(comment.id)
+            && threadBelongsToFragment(comment, frag)
+        );
+        fragThreads.forEach(comment => seenThreadIds.add(comment.id));
+
+        const imgMatch = frag.content.match(/^\[IMG:([^\]]+)\]$/);
+        if (imgMatch && activeBook) {
+            const imgUrl = api.imageUrl(activeBook.id, imgMatch[1]);
+            return (
+                <div key={`${frag.idx}-${frag.startOffset}-${frag.endOffset}`} style={{ marginBottom: PARA_GAP, textAlign: 'center' }}>
+                    <img src={imgUrl} alt="" style={{ maxWidth: '100%', maxHeight: `${Math.floor(readerSize.height * 0.6)}px`, objectFit: 'contain', display: 'block', margin: '0 auto', borderRadius: 8 }} />
+                    {fragThreads.length > 0 && <div style={{ marginTop: 8 }}>{fragThreads.map(comment => renderThread(comment))}</div>}
+                </div>
+            );
+        }
+
+        return (
+            <div key={`${frag.idx}-${frag.startOffset}-${frag.endOffset}`} style={{ marginBottom: chapterTitle ? CHAPTER_GAP_BOTTOM : PARA_GAP, marginTop: chapterTitle && visibleIndex > 0 ? CHAPTER_GAP_TOP : 0 }}>
+                <div data-para-idx={frag.idx} data-frag-start={frag.startOffset} data-frag-end={frag.endOffset} style={{
+                    fontSize: chapterTitle ? readerFontSize + 4 : original.content.trim().startsWith('# ') ? readerFontSize + 3 : original.content.trim().startsWith('## ') ? readerFontSize + 2 : readerFontSize,
+                    lineHeight: chapterTitle ? readerChapterLineHeight : readerLineHeight,
+                    color: readerNightMode ? (heading ? READER_INK_NIGHT : READER_INK_NIGHT_SOFT) : (heading ? '#2c2921' : READER_INK),
+                    letterSpacing: chapterTitle ? 1 : 0.3,
+                    textIndent: (heading || chapterTitle || frag.isPartialStart) ? 0 : '1.5em',
+                    fontWeight: chapterTitle ? 800 : heading ? 700 : 400,
+                    marginBottom: heading ? 4 : 0,
+                    textAlign: chapterTitle ? 'center' : undefined,
+                    fontFamily: READER_SERIF,
+                    userSelect: 'text', WebkitUserSelect: 'text', whiteSpace: 'pre-wrap',
+                } as any}>
+                    {renderHighlighted(decodeEntities(frag.content), frag.idx, inlineComments)}
+                </div>
+                {fragThreads.length > 0 && <div style={{ marginTop: 8 }}>{fragThreads.map(comment => renderThread(comment))}</div>}
+            </div>
+        );
+    });
 
     const btnBase: React.CSSProperties = {
         background: 'rgba(255,255,255,0.6)', backdropFilter: 'blur(18px) saturate(1.05)',
@@ -1728,7 +2043,7 @@ const StudyApp: React.FC = () => {
     );
 
     return (
-        <div className="xiaowo-study" style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column', background: mode === 'reading' ? (readerNightMode ? PAPER_BG_NIGHT : PAPER_BG) : '#f8f8f6', position: 'relative', overflow: 'hidden', filter: mode === 'reading' && readerBrightness < 100 ? `brightness(${readerBrightness / 100})` : undefined }}>
+        <div ref={rootRef} className="xiaowo-study" style={{ height: mode === 'reading' && readerShellHeight ? readerShellHeight : '100%', width: '100%', display: 'flex', flexDirection: 'column', background: mode === 'reading' ? readerBackground : '#f8f8f6', position: 'relative', overflow: 'hidden', filter: mode === 'reading' && readerBrightness < 100 ? `brightness(${readerBrightness / 100})` : undefined }}>
             <style>{`${STUDY_THEME_CSS}\n@keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.04); } }`}</style>
             {/* Header — shelf always shows; reading mode header slides with toolbar */}
             {mode === 'shelf' ? (
@@ -1744,13 +2059,19 @@ const StudyApp: React.FC = () => {
                             for (const id of selectedBooks) {
                                 try {
                                     await api.deleteBook(id);
-                                    try { localStorage.removeItem(`pagebreaks-v3-${id}`); } catch {}
-                                    idbDel(`pagebreaks-v3-${id}`);
+                                    try {
+                                        for (let i = localStorage.length - 1; i >= 0; i--) {
+                                            const key = localStorage.key(i);
+                                            if (key?.startsWith(`pagebreaks-v4-${id}-`) || key?.startsWith(`pagebreaks-v3-${id}-`)) localStorage.removeItem(key);
+                                        }
+                                    } catch {}
+                                    idbDelPrefix(`pagebreaks-v4-${id}-`);
+                                    idbDelPrefix(`pagebreaks-v3-${id}-`);
                                     idbDelParas(`paras-v1-${id}`);
                                     idbDelParas(`comments-v1-${id}`);
                                 } catch {}
                             }
-                            setSelectedBooks(new Set()); setEditMode(false); loadBooks();
+                            setSelectedBooks(new Set()); setEditMode(false); void loadBooks(false);
                             toast(`已删除 ${selectedBooks.size} 本`);
                         }} style={{ ...btnBase, background: '#e55', border: 'none' }} aria-label={`删除选中的${selectedBooks.size}本`}>
                             <TrashIcon color="white" />
@@ -1771,22 +2092,11 @@ const StudyApp: React.FC = () => {
                     {/* Persistent book title — always visible, small grey text */}
                     <div style={{
                         paddingTop: 'calc(12px + env(safe-area-inset-top))', paddingLeft: 20, paddingRight: 20, paddingBottom: 6, textAlign: 'center', flexShrink: 0,
-                        background: readerNightMode ? PAPER_BG_NIGHT : PAPER_BG,
+                        background: readerBackground,
                     }}>
                         <div style={{ fontSize: 11, color: readerNightMode ? '#7a736a' : '#a8a196', letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {activeBook?.title || ''}
                         </div>
-                    </div>
-                    {/* Sliding exit button — top right, only shows with toolbar */}
-                    <div style={{
-                        position: 'absolute', top: 44, right: 12, zIndex: 15,
-                        opacity: showBar ? 1 : 0, transform: showBar ? 'translateY(0)' : 'translateY(-20px)',
-                        transition: 'opacity 0.3s ease, transform 0.3s ease',
-                        pointerEvents: showBar ? 'auto' : 'none',
-                    }}>
-                        <button onClick={backToShelf} style={btnBase}>
-                            <span style={{ fontSize: 16, color: c.primary }}>✕</span>
-                        </button>
                     </div>
                 </>
             )}
@@ -1794,15 +2104,16 @@ const StudyApp: React.FC = () => {
             {/* Content */}
             <div ref={contentRef} style={{
                 flex: 1, position: 'relative',
-                overflowX: 'hidden', overflowY: 'auto',
+                overflowX: 'hidden', overflowY: 'auto', overflowAnchor: 'none', overscrollBehavior: 'contain',
                 padding: mode === 'reading' ? '0' : '8px 20px 32px',
-                background: mode === 'reading' ? (readerNightMode ? PAPER_BG_NIGHT : PAPER_BG) : 'transparent',
+                background: mode === 'reading' ? readerBackground : 'transparent',
             }} className="no-scrollbar study-scroll-container"
+                onScroll={mode === 'reading' && readerMode === 'scroll' ? handleReaderScroll : undefined}
                 onClick={() => { if (mode === 'reading') toggleBar(); else if (focusedThreadId != null) setFocusedThreadId(null); }}
-                onTouchStart={mode === 'reading' ? (e) => {
+                onTouchStart={mode === 'reading' && readerMode === 'paged' ? (e) => {
                     touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
                 } : undefined}
-                onTouchEnd={mode === 'reading' ? (e) => {
+                onTouchEnd={mode === 'reading' && readerMode === 'paged' ? (e) => {
                     if (!touchStart.current) return;
                     const dx = e.changedTouches[0].clientX - touchStart.current.x;
                     const dy = e.changedTouches[0].clientY - touchStart.current.y;
@@ -1818,7 +2129,7 @@ const StudyApp: React.FC = () => {
                 ) : error ? (
                     <div style={{ textAlign: 'center', padding: '60px 20px' }}>
                         <div style={{ fontSize: 13, color: '#e88', marginBottom: 12 }}>{error}</div>
-                        <button onClick={loadBooks} style={{ background: 'none', border: `1px solid ${c.primaryBorder}`, borderRadius: 12, padding: '8px 20px', fontSize: 12, color: c.primary, cursor: 'pointer' }}>重试</button>
+                        <button onClick={() => { void loadBooks(true); }} style={{ background: 'none', border: `1px solid ${c.primaryBorder}`, borderRadius: 12, padding: '8px 20px', fontSize: 12, color: c.primary, cursor: 'pointer' }}>重试</button>
                     </div>
                 ) : mode === 'shelf' ? (
                     <>
@@ -1898,62 +2209,31 @@ const StudyApp: React.FC = () => {
                             </div>
                         ) : allParas.length === 0 ? (
                             <div style={{ textAlign: 'center', padding: '40px 0', color: '#bbb', fontSize: 14 }}>这一页没有内容</div>
-                        ) : (
-                            <div data-page-content style={{ padding: READER_PAGE_PADDING, paddingBottom: 'calc(44px + env(safe-area-inset-bottom))', minHeight: pageHeight || undefined, boxSizing: 'border-box', fontFamily: READER_SERIF }}>
+                        ) : readerMode === 'scroll' ? (
+                            <div data-scroll-document style={{ fontFamily: READER_SERIF }}>
+                                <div aria-hidden style={{ height: scrollPageOffsets[scrollWindow.start - 1] || 0 }} />
                                 {(() => {
-                                const seenThreadIds = new Set<number>();
-                                return pageFragments.map((frag, visibleIndex) => {
-                                    const original = allParas[frag.sourceIdx] || frag;
-                                    const heading = isHeading(original.content) && !frag.isPartialStart;
-                                    const chapterTitle = isChapterStart(original.content) && !frag.isPartialStart;
-                                    const rawInline = commentsForPara(frag.idx).filter(x => x.sel_start_idx != null && x.sel_end_idx != null);
-                                    const inlineComments = rawInline.map(h => {
-                                        const endPara = h.sel_end_para_idx ?? h.paragraph_idx;
-                                        let s = h.sel_start_idx!, e = h.sel_end_idx!;
-                                        if (h.paragraph_idx === frag.idx && endPara === frag.idx) { /* single para */ }
-                                        else if (h.paragraph_idx === frag.idx) { e = frag.endOffset; }
-                                        else if (endPara === frag.idx) { s = frag.startOffset; }
-                                        else { s = frag.startOffset; e = frag.endOffset; }
-                                        return { ...h, sel_start_idx: s - frag.startOffset, sel_end_idx: e - frag.startOffset };
-                                    }).filter(h => h.sel_end_idx! > 0 && h.sel_start_idx! < frag.content.length);
-
-                                    // 行间 thread：本 fragment 上、尚未渲染过的顶层批注（含无选区的整段批注）。
-                                    const fragThreads = commentsForPara(frag.idx).filter(x => !x.reply_to && !seenThreadIds.has(x.id));
-                                    fragThreads.forEach(x => seenThreadIds.add(x.id));
-
-                                    const imgMatch = frag.content.match(/^\[IMG:([^\]]+)\]$/);
-                                    if (imgMatch && activeBook) {
-                                        const imgUrl = api.imageUrl(activeBook.id, imgMatch[1]);
-                                        return (
-                                            <div key={`${frag.idx}-${frag.startOffset}-${frag.endOffset}`} style={{ marginBottom: PARA_GAP, textAlign: 'center' }}>
-                                                <img src={imgUrl} alt="" style={{ maxWidth: '100%', maxHeight: `${Math.floor(readerSize.height * 0.6)}px`, objectFit: 'contain', display: 'block', margin: '0 auto', borderRadius: 8 }} />
-                                            </div>
+                                    const seenThreadIds = new Set<number>();
+                                    const pages: React.ReactNode[] = [];
+                                    for (let pageNumber = scrollWindow.start; pageNumber <= scrollWindow.end; pageNumber++) {
+                                        const fragments = readerPageFragments(allParas, pageBreaks, pageNumber) as PageFragment[];
+                                        pages.push(
+                                            <section key={pageNumber} data-scroll-page={pageNumber} style={{
+                                                minHeight: estimatedScrollPageHeight,
+                                                padding: `18px ${readerSidePadding}px 10px`,
+                                                boxSizing: 'border-box',
+                                            }}>
+                                                {renderFragments(fragments, seenThreadIds)}
+                                            </section>
                                         );
                                     }
-                                    return (
-                                        <div key={`${frag.idx}-${frag.startOffset}-${frag.endOffset}`} style={{ marginBottom: chapterTitle ? CHAPTER_GAP_BOTTOM : PARA_GAP, marginTop: chapterTitle && visibleIndex > 0 ? CHAPTER_GAP_TOP : 0 }}>
-                                            <div data-para-idx={frag.idx} data-frag-start={frag.startOffset} data-frag-end={frag.endOffset} style={{
-                                                fontSize: chapterTitle ? readerFontSize + 4 : original.content.trim().startsWith('# ') ? readerFontSize + 3 : original.content.trim().startsWith('## ') ? readerFontSize + 2 : readerFontSize,
-                                                lineHeight: chapterTitle ? 2.2 : 1.85,
-                                                color: readerNightMode ? (heading ? READER_INK_NIGHT : READER_INK_NIGHT_SOFT) : (heading ? '#2c2921' : READER_INK),
-                                                letterSpacing: chapterTitle ? 1 : 0.3, textIndent: (heading || chapterTitle || frag.isPartialStart) ? 0 : '1.5em',
-                                                fontWeight: chapterTitle ? 800 : heading ? 700 : 400, marginBottom: heading ? 4 : 0,
-                                                textAlign: chapterTitle ? 'center' : undefined,
-                                                fontFamily: READER_SERIF,
-                                                userSelect: 'text', WebkitUserSelect: 'text', whiteSpace: 'pre-wrap',
-                                            } as any}>
-                                                {renderHighlighted(decodeEntities(frag.content), frag.idx, inlineComments)}
-                                            </div>
-
-                                            {fragThreads.length > 0 && (
-                                                <div style={{ marginTop: 8 }}>
-                                                    {fragThreads.map(cmt => renderThread(cmt))}
-                                                </div>
-                                            )}
-                                        </div>
-                                    );
-                                });
+                                    return pages;
                                 })()}
+                                <div aria-hidden style={{ height: Math.max(0, scrollPageOffsets[totalPages] - scrollPageOffsets[scrollWindow.end]) }} />
+                            </div>
+                        ) : (
+                            <div data-page-content style={{ padding: `56px ${readerSidePadding}px calc(44px + env(safe-area-inset-bottom))`, minHeight: pageHeight || undefined, boxSizing: 'border-box', fontFamily: READER_SERIF }}>
+                                {renderFragments(pageFragments, new Set<number>())}
                             </div>
                         )}
                     </>
@@ -2000,25 +2280,31 @@ const StudyApp: React.FC = () => {
                 </div>
             )}
 
-            {/* 新建批注编辑框 — 安静的纸面卡片，不抢正文 */}
-            {mode === 'reading' && commentingIdx !== null && !replyingTo && (
+            {/* 批注/回应共用阅读区外的编辑纸片。输入控件不再嵌在正文 scroller
+                里，Android 聚焦时就没有可被浏览器自动推入视野的书页祖先。 */}
+            {mode === 'reading' && commentingIdx !== null && (
                 <div onClick={(e) => e.stopPropagation()} style={{
-                    position: 'absolute', left: 16, right: 16, bottom: 20, zIndex: 32,
+                    position: 'absolute', left: 16, right: 16, bottom: 20 + keyboardInset, zIndex: 32,
                     background: readerNightMode ? '#2b2924' : '#fff',
                     borderRadius: 14, padding: 14, border: `1px solid ${c.primaryBorder}`,
                     boxShadow: '0 -2px 24px rgba(0,0,0,0.10)',
                 }}>
-                    {selectedText && (
+                    {replyingTo ? (
+                        <div style={{ fontSize: 12, color: c.muted, marginBottom: 10, padding: '7px 10px', background: authorIsShen(replyingTo.from_who) ? c.shenBg : c.tongBg, borderRadius: 8, lineHeight: 1.5, borderLeft: `2px solid ${authorIsShen(replyingTo.from_who) ? c.shenColor : c.tongColor}`, maxHeight: 72, overflow: 'auto' }} className="no-scrollbar">
+                            回应 {displayName(replyingTo.from_who)} · {replyingTo.content.length > 120 ? replyingTo.content.slice(0, 120) + '…' : replyingTo.content}
+                        </div>
+                    ) : selectedText ? (
                         <div style={{ fontSize: 12, color: c.muted, marginBottom: 10, padding: '7px 10px', background: c.tongBg, borderRadius: 8, lineHeight: 1.5, borderLeft: `2px solid ${c.tongColor}`, maxHeight: 96, overflow: 'auto' }} className="no-scrollbar">
                             {selectedText.length > 160 ? selectedText.slice(0, 160) + '…' : selectedText}
                         </div>
-                    )}
-                    <textarea value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="写下你的想法…"
-                        style={{ width: '100%', minHeight: 68, border: 'none', background: 'transparent', fontSize: 14, color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, resize: 'none', outline: 'none', lineHeight: 1.6, fontFamily: READER_SERIF }} autoFocus />
+                    ) : null}
+                    <textarea ref={commentEditorRef} value={commentText} onChange={e => setCommentText(e.target.value)} placeholder={replyingTo ? '写回应…' : '写下你的想法…'}
+                        onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') handleAddComment(); }}
+                        style={{ width: '100%', minHeight: 68, border: 'none', background: 'transparent', fontSize: 14, color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, resize: 'none', outline: 'none', lineHeight: 1.6, fontFamily: READER_SERIF }} />
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
-                        <button onClick={() => { setCommentingIdx(null); setCommentText(''); setSelectedText(''); setSelRange(null); }}
+                        <button onClick={() => { setCommentingIdx(null); setReplyingTo(null); setCommentText(''); setSelectedText(''); setSelRange(null); }}
                             style={{ background: 'none', border: 'none', padding: '7px 10px', fontSize: 12, color: c.muted, cursor: 'pointer' }}>取消</button>
-                        <button onClick={handleAddComment} disabled={!commentText.trim()} aria-label="保存批注"
+                        <button onClick={handleAddComment} disabled={!commentText.trim()} aria-label={replyingTo ? '发送回应' : '保存批注'}
                             style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 34, height: 34, background: c.primary, border: 'none', borderRadius: '50%', cursor: commentText.trim() ? 'pointer' : 'default', opacity: commentText.trim() ? 1 : 0.5 }}>
                             <SendIcon color="#fff" size={15} />
                         </button>
@@ -2145,46 +2431,76 @@ const StudyApp: React.FC = () => {
                         </div>
                     </div>
 
-                    {/* Reading settings panel — brightness, font size, night mode, 上下文范围 */}
+                    {/* Reading settings — a few tactile controls, kept in the same quiet paper language. */}
                     <div onClick={(e) => e.stopPropagation()} className="no-scrollbar" style={{
-                        position: 'absolute', bottom: showBar ? 90 : -400, left: 16, right: 16, zIndex: 20,
-                        background: readerNightMode ? '#2b2924' : '#fff',
-                        borderRadius: 16, padding: '18px 20px', maxHeight: '68vh', overflowY: 'auto',
-                        boxShadow: '0 -2px 24px rgba(0,0,0,0.10)', border: `1px solid ${c.primaryBorder}`,
+                        position: 'absolute', bottom: showBar ? 90 : -760, left: 16, right: 16, zIndex: 20,
+                        background: readerNightMode ? '#292722' : '#fbfaf7',
+                        borderRadius: 20, padding: '16px 18px 18px', maxHeight: '68vh', overflowY: 'auto',
+                        boxShadow: '0 -2px 22px rgba(0,0,0,0.08)', border: `1px solid ${c.primaryBorder}`,
                         opacity: showFontPanel && showBar ? 1 : 0,
                         transform: showFontPanel && showBar ? 'translateY(0)' : 'translateY(20px)',
                         transition: 'opacity 0.25s ease, transform 0.25s ease, bottom 0.3s ease',
                         pointerEvents: showFontPanel && showBar ? 'auto' : 'none',
                     }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: readerNightMode ? READER_INK_NIGHT : READER_INK, letterSpacing: 0.4, marginBottom: 14 }}>阅读设置</div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 17 }}>
                             <span style={{ fontSize: 13, color: readerNightMode ? '#666' : '#bbb', lineHeight: 1 }}>☀</span>
                             <input type="range" min={30} max={100} step={1} value={readerBrightness}
                                 onChange={e => { const v = parseInt(e.target.value, 10); setReaderBrightness(v); localStorage.setItem('coread-brightness', String(v)); }}
                                 style={{ flex: 1, accentColor: c.primary, height: 4 }} />
                             <span style={{ fontSize: 16, color: readerNightMode ? '#888' : '#999', lineHeight: 1 }}>☀</span>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 14, borderRadius: 8, overflow: 'hidden', border: `1px solid ${readerNightMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}` }}>
-                            <button onClick={() => { const v = Math.max(12, readerFontSize - 1); setReaderFontSize(v); localStorage.setItem('coread-font-size', String(v)); }}
-                                style={{ flex: 1, padding: '8px 0', background: 'none', border: 'none', borderRight: `1px solid ${readerNightMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}`, cursor: 'pointer', fontSize: 13, fontFamily: 'serif', color: readerNightMode ? '#aaa' : '#666' }}>
-                                A<span style={{ fontSize: 9, verticalAlign: 'super' }}>−</span>
-                            </button>
-                            <span style={{ padding: '8px 14px', fontSize: 12, color: c.primary, fontWeight: 600, textAlign: 'center', minWidth: 36, borderRight: `1px solid ${readerNightMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}` }}>
-                                {readerFontSize}
-                            </span>
-                            <button onClick={() => { const v = Math.min(22, readerFontSize + 1); setReaderFontSize(v); localStorage.setItem('coread-font-size', String(v)); }}
-                                style={{ flex: 1, padding: '8px 0', background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, fontFamily: 'serif', color: readerNightMode ? '#aaa' : '#666' }}>
-                                A<span style={{ fontSize: 9, verticalAlign: 'super' }}>+</span>
-                            </button>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, padding: '12px 12px 9px', borderRadius: 14, background: readerNightMode ? 'rgba(255,255,255,0.035)' : 'rgba(61,57,41,0.035)' }}>
+                            <span style={{ fontSize: 12, color: readerNightMode ? '#8c857b' : '#8f897f', fontFamily: READER_SERIF }}>A</span>
+                            <div style={{ position: 'relative', flex: 1, paddingTop: 9 }}>
+                                <input aria-label="正文字号" type="range" min={12} max={22} step={1} value={readerFontSize}
+                                    onChange={e => changeReaderFontSize(parseInt(e.target.value, 10))}
+                                    style={{ display: 'block', width: '100%', accentColor: c.primary, height: 4 }} />
+                                <span style={{ position: 'absolute', top: -9, left: `${((readerFontSize - 12) / 10) * 100}%`, transform: 'translateX(-50%)', minWidth: 24, textAlign: 'center', fontSize: 10, lineHeight: '16px', borderRadius: 9, color: c.primary, background: readerNightMode ? '#38342d' : '#efe9e1', pointerEvents: 'none' }}>{readerFontSize}</span>
+                            </div>
+                            <span style={{ fontSize: 19, color: readerNightMode ? '#b6aea2' : '#5c574e', fontFamily: READER_SERIF }}>A</span>
                         </div>
-                        <div style={{ display: 'flex', gap: 8 }}>
-                            <button onClick={() => { setReaderNightMode(false); localStorage.setItem('coread-night-mode', 'false'); }}
-                                style={{ flex: 1, padding: '8px 0', borderRadius: 8, border: `1.5px solid ${!readerNightMode ? c.primary : (readerNightMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)')}`, background: !readerNightMode ? `${c.primary}12` : 'transparent', cursor: 'pointer', fontSize: 12, color: !readerNightMode ? c.primary : (readerNightMode ? '#777' : '#999'), fontWeight: 500 }}>
-                                ☀ 日间
-                            </button>
-                            <button onClick={() => { setReaderNightMode(true); localStorage.setItem('coread-night-mode', 'true'); }}
-                                style={{ flex: 1, padding: '8px 0', borderRadius: 8, border: `1.5px solid ${readerNightMode ? c.primary : 'rgba(0,0,0,0.06)'}`, background: readerNightMode ? `${c.primary}12` : 'transparent', cursor: 'pointer', fontSize: 12, color: readerNightMode ? c.primary : '#999', fontWeight: 500 }}>
-                                ☾ 夜间
-                            </button>
+
+                        <div style={{ marginBottom: 14 }}>
+                            <div style={{ fontSize: 10, color: c.muted, marginBottom: 7, letterSpacing: 0.4 }}>阅读方式</div>
+                            <div style={{ display: 'flex', padding: 3, gap: 3, borderRadius: 13, background: readerNightMode ? 'rgba(255,255,255,0.045)' : 'rgba(61,57,41,0.055)' }}>
+                                {([{ id: 'paged', label: '左右分页' }, { id: 'scroll', label: '上下滚动' }] as const).map(option => {
+                                    const selected = readerMode === option.id;
+                                    return <button key={option.id} onClick={() => changeReaderMode(option.id)} style={{ flex: 1, padding: '8px 6px', border: 'none', borderRadius: 10, background: selected ? (readerNightMode ? '#3a362f' : '#fff') : 'transparent', color: selected ? c.primary : c.muted, fontSize: 12, fontWeight: selected ? 700 : 500, cursor: 'pointer', boxShadow: selected ? '0 1px 4px rgba(0,0,0,0.06)' : 'none' }}>{option.label}</button>;
+                                })}
+                            </div>
+                        </div>
+
+                        {([
+                            { label: '行距', value: readerLineSpacing, options: [{ id: 'tight', label: '紧' }, { id: 'normal', label: '中' }, { id: 'loose', label: '松' }], onChange: changeLineSpacing },
+                            { label: '边距', value: readerMargin, options: [{ id: 'small', label: '小' }, { id: 'medium', label: '中' }, { id: 'large', label: '大' }], onChange: changePageMargin },
+                        ] as const).map(group => (
+                            <div key={group.label} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                                <span style={{ width: 30, flexShrink: 0, fontSize: 10, color: c.muted }}>{group.label}</span>
+                                <div style={{ display: 'flex', flex: 1, padding: 3, gap: 3, borderRadius: 13, background: readerNightMode ? 'rgba(255,255,255,0.045)' : 'rgba(61,57,41,0.055)' }}>
+                                    {group.options.map(option => {
+                                        const selected = group.value === option.id;
+                                        return <button key={option.id} onClick={() => (group.onChange as (value: any) => void)(option.id)} style={{ flex: 1, padding: '7px 4px', border: 'none', borderRadius: 10, background: selected ? (readerNightMode ? '#3a362f' : '#fff') : 'transparent', color: selected ? c.primary : c.muted, fontSize: 12, fontWeight: selected ? 700 : 500, cursor: 'pointer', boxShadow: selected ? '0 1px 4px rgba(0,0,0,0.06)' : 'none' }}>{option.label}</button>;
+                                    })}
+                                </div>
+                            </div>
+                        ))}
+
+                        <div style={{ marginTop: 2 }}>
+                            <div style={{ fontSize: 10, color: c.muted, marginBottom: 8, letterSpacing: 0.4 }}>阅读背景</div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                                {READER_PAPERS.map(option => {
+                                    const selected = readerPaperId === option.id;
+                                    return (
+                                        <button key={option.id} onClick={() => changeReaderPaper(option.id)} aria-label={`阅读背景：${option.label}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '4px 2px', border: 'none', background: 'transparent', color: selected ? c.primary : c.muted, fontSize: 9, fontWeight: selected ? 700 : 500, cursor: 'pointer' }}>
+                                            <span style={{ width: 28, height: 28, borderRadius: '50%', background: option.background, border: `1px solid ${option.dark ? 'rgba(255,255,255,0.18)' : 'rgba(61,57,41,0.12)'}`, outline: selected ? `2px solid ${c.primary}` : '2px solid transparent', outlineOffset: 2 }} />
+                                            {option.label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
                         </div>
 
                         {/* 上下文范围 — 同一个值用于「批注触发 AI」和「从选中句主动讨论」（Phase 3） */}

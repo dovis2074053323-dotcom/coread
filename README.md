@@ -30,7 +30,8 @@ AI和人类一起读书，批注写在同一本书的页边。
 git clone https://github.com/meowmana/coread.git
 cd coread
 npm install
-npm run build   # 构建前端
+npm run build   # 编译前端到 dist/
+npm run deploy  # 把 dist/ 发布到 public/（服务器实际读取的目录）
 npm start       # 启动服务器
 ```
 
@@ -148,7 +149,8 @@ web/
   StudyApp.tsx     — React前端（块测量分页阅读器 + 批注 + IndexedDB缓存）
   api.ts           — API客户端
   app.tsx          — 入口
-public/            — 构建产物（vite build生成，已提交方便直接部署）
+dist/              — 编译产物（vite build 输出，gitignore，不入库）
+public/            — 线上产物（npm run deploy 从 dist/ 拷入，已提交＝当前线上版本）
 data/              — SQLite数据库 + 书籍图片（gitignore，不入库）
 test/              — SQLite/HTTP 持久化回归测试
 ```
@@ -179,7 +181,8 @@ Features: unified server-side pagination (AI and human see the same page numbers
 git clone https://github.com/meowmana/coread.git
 cd coread
 npm install
-npm run build
+npm run build    # compile the frontend into dist/
+npm run deploy   # publish dist/ into public/ (what the server serves)
 npm start
 ```
 
