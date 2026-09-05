@@ -1296,7 +1296,7 @@ const StudyApp: React.FC = () => {
         if (!activeBook || commentingIdx === null || !commentText.trim()) return;
         try {
             const result = await api.addBookComment(activeBook.id, {
-                paragraph_idx: commentingIdx, content: commentText.trim(), from_who: humanName,
+                paragraph_idx: commentingIdx, content: commentText.trim(), from_who: humanName, origin: 'human',
                 selected_text: selectedText || undefined,
                 sel_start_idx: selRange ? selRange.start : undefined,
                 sel_end_idx: selRange ? selRange.end : undefined,
