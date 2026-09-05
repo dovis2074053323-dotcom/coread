@@ -1327,7 +1327,7 @@ const StudyApp: React.FC = () => {
     const toggleFontPanel = () => { setShowFontPanel(v => !v); setShowBookmarkMenu(false); setShowMoreMenu(false); };
     const toggleMoreMenu = () => { setShowMoreMenu(v => !v); setShowBookmarkMenu(false); setShowFontPanel(false); };
 
-    const handleExport = (format: 'epub' | 'md') => {
+    const handleExport = (format: 'epub' | 'md' | 'annotations-md') => {
         if (!activeBook) return;
         setShowMoreMenu(false);
         window.open(coreadPath(`/v1/books/${activeBook.id}/export?format=${format}`), '_blank');
@@ -2224,7 +2224,13 @@ const StudyApp: React.FC = () => {
                             style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer',
                                 padding: '10px 12px', borderRadius: 10, fontSize: 13,
                                 color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>
-                            Markdown
+                            Markdown（整本）
+                        </button>
+                        <button onClick={() => handleExport('annotations-md')}
+                            style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer',
+                                padding: '10px 12px', borderRadius: 10, fontSize: 13,
+                                color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>
+                            批注摘录（Markdown）
                         </button>
                     </div>
                 </>
