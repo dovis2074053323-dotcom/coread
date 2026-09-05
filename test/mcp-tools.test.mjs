@@ -29,7 +29,7 @@ test('tools/list exposes the compact MCP schemas', () => {
   ]);
   assert.equal(byName.search_books.description, 'Find books by title.');
   assert.deepEqual(byName.search_books.inputSchema.properties, {
-    query: { type: 'string' },
+    query: { type: 'string', minLength: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 20 },
   });
   assert.equal(byName.list_books.description, 'List books and reading position.');
@@ -58,6 +58,13 @@ test('search_books uses NFKC lowercase title substring and limit', () => {
     new Set(['alpha notes', 'Ａlpha Reading']),
   );
   assert.deepEqual(handleTool('search_books', { query: 'missing' }), []);
+});
+
+test('search_books rejects blank query without matching the whole shelf', () => {
+  seedBook('Blank query fixture', ['body']);
+  assert.deepEqual(handleTool('search_books', { query: '' }), []);
+  assert.deepEqual(handleTool('search_books', { query: '   ' }), []);
+  assert.deepEqual(handleTool('search_books', { query: '　' }), []);
 });
 
 test('read/list/comment/toc projections do not leak database fields', () => {

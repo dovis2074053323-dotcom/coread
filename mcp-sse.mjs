@@ -27,7 +27,7 @@ function handleJsonRpc(msg) {
     try {
       const result = handleTool(name, args || {});
       return { jsonrpc: '2.0', id: msg.id, result: {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(result) }],
       }};
     } catch (e) {
       return { jsonrpc: '2.0', id: msg.id, result: {

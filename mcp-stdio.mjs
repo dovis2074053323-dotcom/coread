@@ -47,7 +47,7 @@ function handleMessage(msg) {
     try {
       const result = handleTool(name, args || {});
       send({ jsonrpc: '2.0', id: msg.id, result: {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(result) }],
       }});
     } catch (e) {
       send({ jsonrpc: '2.0', id: msg.id, result: {
