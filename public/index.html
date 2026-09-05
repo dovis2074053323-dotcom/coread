@@ -2,16 +2,18 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
+  <meta name="theme-color" content="#f8f8f6">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>共读室 · coread</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; overflow: hidden; }
+    :root { --app-height: 100vh; }
+    @supports (height: 100lvh) { :root { --app-height: 100lvh; } }
+    html, body { height: var(--app-height); overflow: hidden; overscroll-behavior: none; }
     body { font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; background: #f8f8f6; color: #3d3929; -webkit-font-smoothing: antialiased; }
-    #root { height: 100%; overflow: hidden; }
-    @supports (height: 100dvh) { html, body, #root { height: 100dvh; } }
+    #root { height: var(--app-height); overflow: hidden; }
   </style>
-  <script type="module" crossorigin src="./assets/index-D_vVu3kO.js"></script>
+  <script type="module" crossorigin src="./assets/index-DJkns1DJ.js"></script>
 </head>
 <body>
   <div id="root"></div>
