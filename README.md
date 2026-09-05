@@ -134,6 +134,20 @@ npm run dev     # Vite开发服务器（API代理到localhost:3000）
 npm start       # 生产模式（提供构建好的前端）
 ```
 
+### 构建与上线
+
+「编译」和「上线」是分开的两步，别合并：
+
+```bash
+npm run build    # 编译前端 → dist/（gitignore，不影响任何人）
+npm run deploy   # 把 dist/ 拷进 public/ —— 这一步才是上线
+```
+
+`server.mjs` 对 `public/` 是每次请求现读磁盘、零缓存，`public/` 一改立刻
+就是所有人看到的线上页面。所以 `npm run build` 只写 `dist/`，绝不碰
+`public/`；确认改动没问题、`git commit` 之后，再手动 `npm run deploy`，
+并把 `public/` 的变更作为一次单独的部署提交。
+
 ## 项目结构
 
 ```
@@ -187,6 +201,12 @@ npm start
 ```
 
 Open `http://localhost:3000` in your browser.
+
+**Build and deploy are two separate steps** — keep them apart. `npm run build`
+only writes `dist/` (gitignored). `npm run deploy` copies `dist/` into `public/`,
+which the server reads straight off disk with zero caching — so `public/` changing
+*is* the site changing for everyone. Build freely; deploy only after you've
+reviewed and committed, and commit the `public/` change as its own deploy commit.
 
 ### MCP Setup
 
