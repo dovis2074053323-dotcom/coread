@@ -1872,6 +1872,7 @@ const StudyApp: React.FC = () => {
                                                 </div>
                                                 <div style={{ padding: '8px 2px 0', overflow: 'hidden' }}>
                                                     <div style={{ fontSize: 11, fontWeight: 600, color: c.primaryDark, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } as any}>{book.title}</div>
+                                                    <div style={{ fontSize: 9, color: c.muted, marginTop: 2 }}>#{book.id}</div>
                                                 </div>
                                             </button>
                                         </div>
