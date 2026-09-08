@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, startTransition, useLayoutEffect, useMemo } from 'react';
 import { api, coreadPath } from './api';
+import { unreadReplies } from './reply-poll.mjs';
 import { findBookById } from './open-book.js';
 import { readerPageFragments, stripReaderHeading, threadBelongsToFragment, virtualPageRange } from './reader-layout.js';
 
@@ -147,6 +148,21 @@ const STUDY_THEME_CSS = `
     width: 0;
     height: 0;
     display: none;
+}
+.xiaowo-study .fade-scroll {
+    --fade-size: 20px;
+}
+.xiaowo-study .fade-scroll-top {
+    -webkit-mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-size), #000 100%);
+    mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-size), #000 100%);
+}
+.xiaowo-study .fade-scroll-bottom {
+    -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - var(--fade-size)), transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - var(--fade-size)), transparent 100%);
+}
+.xiaowo-study .fade-scroll-top.fade-scroll-bottom {
+    -webkit-mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-size), #000 calc(100% - var(--fade-size)), transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-size), #000 calc(100% - var(--fade-size)), transparent 100%);
 }
 `;
 
@@ -328,8 +344,10 @@ const StudyApp: React.FC = () => {
     const restoringProgressRef = useRef(false);
     const openGenerationRef = useRef(0);
     const [readerShellHeight, setReaderShellHeight] = useState<number | null>(null);
-    const [keyboardInset, setKeyboardInset] = useState(0);
     const shellViewportRef = useRef({ width: 0, height: 0 });
+    const editorCardRef = useRef<HTMLDivElement>(null);
+    const isCommentingRef = useRef(false);
+    const syncReaderViewportRef = useRef<() => void>(() => {});
     const [scrollWindow, setScrollWindow] = useState({ start: 1, end: 1 });
     const scrollPageHeightsRef = useRef<Map<number, number>>(new Map());
     const [scrollMetricsVersion, setScrollMetricsVersion] = useState(0);
@@ -349,6 +367,7 @@ const StudyApp: React.FC = () => {
     const [replyingTo, setReplyingTo] = useState<Comment | null>(null);
     const commentEditorRef = useRef<HTMLTextAreaElement>(null);
     const [newReplies, setNewReplies] = useState<ReplyNotice[]>([]);
+    const lastSeenRef = useRef(0);
     const [showReplies, setShowReplies] = useState(false);
     const [returnPoint, setReturnPoint] = useState<{ page: number; paraIdx: number | null } | null>(null);
     const [floatingBar, setFloatingBar] = useState<{ startPara: number; endPara: number; text: string; start: number; end: number } | null>(null);
@@ -357,14 +376,15 @@ const StudyApp: React.FC = () => {
     // 「从选中句主动讨论」。localStorage 只作即时回显，真值以服务端 config 表为准。
     const [contextChars, setContextCharsState] = useState<number>(() => {
         const v = parseInt(localStorage.getItem('coread-context-chars') || '300', 10);
-        return Number.isFinite(v) && v >= 50 && v <= 5000 ? v : 300;
+        return Number.isFinite(v) && v >= 0 && v <= 5000 ? v : 300;
     });
     const [contextCustom, setContextCustom] = useState(() => !CONTEXT_PRESETS.includes(
         parseInt(localStorage.getItem('coread-context-chars') || '300', 10)
     ));
     const contextSaveTimer = useRef<any>(null);
     const setContextChars = useCallback((value: number) => {
-        const clamped = Math.min(5000, Math.max(50, Math.round(value || 0) || 300));
+        if (!Number.isSafeInteger(value) || value < 0 || value > 5000) return;
+        const clamped = value;
         setContextCharsState(clamped);
         localStorage.setItem('coread-context-chars', String(clamped));
         if (contextSaveTimer.current) clearTimeout(contextSaveTimer.current);
@@ -375,7 +395,7 @@ const StudyApp: React.FC = () => {
     useEffect(() => {
         api.fetchSettings().then((d: any) => {
             const v = Number(d?.context_chars);
-            if (Number.isFinite(v) && v >= 50 && v <= 5000) {
+            if (Number.isSafeInteger(v) && v >= 0 && v <= 5000) {
                 setContextCharsState(v);
                 localStorage.setItem('coread-context-chars', String(v));
                 setContextCustom(!CONTEXT_PRESETS.includes(v));
@@ -469,7 +489,6 @@ const StudyApp: React.FC = () => {
         if (lower === 'ai' || lower === aiName.toLowerCase()) return aiName;
         return from;
     };
-    const barTimer = useRef<any>(null);
     const touchStart = useRef<{ x: number; y: number; t: number } | null>(null);
 
     const toggleBar = () => {
@@ -477,8 +496,7 @@ const StudyApp: React.FC = () => {
         if (floatingBar) return;
         setShowBar(prev => {
             const next = !prev;
-            if (barTimer.current) clearTimeout(barTimer.current);
-            if (next) barTimer.current = setTimeout(() => setShowBar(false), 5000);
+            if (!next) { setShowBookmarkMenu(false); setShowFontPanel(false); setShowMoreMenu(false); }
             return next;
         });
     };
@@ -576,29 +594,37 @@ const StudyApp: React.FC = () => {
         };
     }, [mode, activeBook?.id]);
 
-    // Poll for new replies from 沉
+    // Poll for new replies from 沉. `lastSeenRef` is advanced synchronously by
+    // dismissReplies, so a response that was already in flight cannot revive a
+    // notice the reader just marked as read.
     useEffect(() => {
         if (mode !== 'reading' || !activeBook) return;
+        const bookId = activeBook.id;
+        lastSeenRef.current = parseInt(localStorage.getItem(`book-${bookId}-last-seen`) || '0', 10) || 0;
+        let currentBook = true;
         const check = async () => {
             try {
-                const lastSeen = parseInt(localStorage.getItem(`book-${activeBook.id}-last-seen`) || '0');
-                const r = await fetch(coreadPath(`/v1/books/${activeBook.id}/new-replies?since=${lastSeen}`));
+                const since = lastSeenRef.current;
+                const r = await fetch(coreadPath(`/v1/books/${bookId}/new-replies?since=${since}`));
                 if (r.ok) {
                     const d = await r.json();
-                    const aiOnly = (d.replies || []).filter((r: any) => r.from_who.toLowerCase() !== humanName.toLowerCase());
+                    if (!currentBook) return;
+                    const currentLastSeen = lastSeenRef.current;
+                    const aiOnly = unreadReplies(d.replies, currentLastSeen, humanName) as ReplyNotice[];
                     setNewReplies(aiOnly.length ? aiOnly : []);
                 }
             } catch {}
         };
         check();
         const interval = setInterval(check, 5000);
-        return () => clearInterval(interval);
+        return () => { currentBook = false; clearInterval(interval); };
     }, [mode, activeBook?.id]);
 
     const dismissReplies = () => {
         if (activeBook && newReplies.length) {
             const maxId = Math.max(...newReplies.map(r => r.id));
-            localStorage.setItem(`book-${activeBook.id}-last-seen`, String(maxId));
+            lastSeenRef.current = Math.max(lastSeenRef.current, maxId);
+            localStorage.setItem(`book-${activeBook.id}-last-seen`, String(lastSeenRef.current));
         }
         setNewReplies([]);
         setShowReplies(false);
@@ -916,7 +942,7 @@ const StudyApp: React.FC = () => {
         if (mode !== 'reading' || !rootRef.current) {
             shellViewportRef.current = { width: 0, height: 0 };
             setReaderShellHeight(null);
-            setKeyboardInset(0);
+            editorCardRef.current?.style.setProperty('--keyboard-inset', '0px');
             return;
         }
         const root = rootRef.current;
@@ -930,22 +956,32 @@ const StudyApp: React.FC = () => {
             const height = Math.round(root.getBoundingClientRect().height || window.innerHeight);
             shellViewportRef.current = { width, height };
             setReaderShellHeight(height);
-            setKeyboardInset(0);
+            editorCardRef.current?.style.setProperty('--keyboard-inset', '0px');
         };
         lockCurrentViewport();
 
         const onViewportChange = () => {
             const width = Math.round(window.innerWidth || root.clientWidth);
             const locked = shellViewportRef.current;
+            const visibleHeight = readVisibleHeight();
+            if (isCommentingRef.current) {
+                // Keyboard animation can emit many resize/scroll events and a
+                // few pixels of width jitter. Move only the detached editor;
+                // leave the paper and pagination at their pre-keyboard shape.
+                if (Math.abs(width - locked.width) <= 80) {
+                    editorCardRef.current?.style.setProperty('--keyboard-inset', `${Math.max(0, locked.height - visibleHeight)}px`);
+                    return;
+                }
+            }
             if (!locked.height || Math.abs(width - locked.width) > 2) {
-                const height = readVisibleHeight();
-                shellViewportRef.current = { width, height };
-                setReaderShellHeight(height);
-                setKeyboardInset(0);
+                shellViewportRef.current = { width, height: visibleHeight };
+                setReaderShellHeight(visibleHeight);
+                editorCardRef.current?.style.setProperty('--keyboard-inset', '0px');
                 return;
             }
-            setKeyboardInset(Math.max(0, locked.height - readVisibleHeight()));
+            editorCardRef.current?.style.setProperty('--keyboard-inset', `${Math.max(0, locked.height - visibleHeight)}px`);
         };
+        syncReaderViewportRef.current = onViewportChange;
         window.addEventListener('resize', onViewportChange);
         viewport?.addEventListener('resize', onViewportChange);
         viewport?.addEventListener('scroll', onViewportChange);
@@ -953,8 +989,14 @@ const StudyApp: React.FC = () => {
             window.removeEventListener('resize', onViewportChange);
             viewport?.removeEventListener('resize', onViewportChange);
             viewport?.removeEventListener('scroll', onViewportChange);
+            syncReaderViewportRef.current = () => {};
         };
     }, [mode]);
+
+    useLayoutEffect(() => {
+        isCommentingRef.current = commentingIdx !== null;
+        if (commentingIdx === null) syncReaderViewportRef.current();
+    }, [commentingIdx]);
 
     const lockedHeightRef = useRef<number>(0);
     const lockedWidthRef = useRef<number>(0);
@@ -967,6 +1009,7 @@ const StudyApp: React.FC = () => {
             frame = requestAnimationFrame(() => {
                 const width = Math.round(el.clientWidth);
                 const height = Math.max(0, Math.round(el.clientHeight - READER_VERTICAL_PADDING_STATIC - getSafeAreaBottom()));
+                if (!initial && isCommentingRef.current && Math.abs(width - lockedWidthRef.current) <= 80) return;
                 const widthChanged = Math.abs(width - lockedWidthRef.current) > 2;
                 if (lockedHeightRef.current === 0 || initial || widthChanged) {
                     lockedHeightRef.current = height;
@@ -1453,7 +1496,13 @@ const StudyApp: React.FC = () => {
     }, [readerMode, readingLoading, page, totalPages, scrollWindow, pageBreaks]);
 
     const handleReaderScroll = () => {
-        if (readerMode !== 'scroll' || !contentRef.current || pendingScrollPageRef.current != null) return;
+        if (readerMode !== 'scroll' || !contentRef.current) return;
+        const scroller = contentRef.current;
+        const top = scroller.scrollTop > 8;
+        const bottom = scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1;
+        scroller.classList.toggle('fade-scroll-top', top);
+        scroller.classList.toggle('fade-scroll-bottom', bottom);
+        if (pendingScrollPageRef.current != null) return;
         cancelAnimationFrame(scrollFrameRef.current);
         scrollFrameRef.current = requestAnimationFrame(() => {
             const container = contentRef.current;
@@ -1474,6 +1523,14 @@ const StudyApp: React.FC = () => {
             }
         });
     };
+
+    useEffect(() => {
+        if (readerMode !== 'scroll' || !contentRef.current) {
+            contentRef.current?.classList.remove('fade-scroll-top', 'fade-scroll-bottom');
+            return;
+        }
+        handleReaderScroll();
+    }, [readerMode, scrollWindow, totalPages]);
 
     useEffect(() => () => cancelAnimationFrame(scrollFrameRef.current), []);
 
@@ -2087,19 +2144,7 @@ const StudyApp: React.FC = () => {
                         <PlusIcon color={c.primary} />
                     </button>
                 </div>
-            ) : (
-                <>
-                    {/* Persistent book title — always visible, small grey text */}
-                    <div style={{
-                        paddingTop: 'calc(12px + env(safe-area-inset-top))', paddingLeft: 20, paddingRight: 20, paddingBottom: 6, textAlign: 'center', flexShrink: 0,
-                        background: readerBackground,
-                    }}>
-                        <div style={{ fontSize: 11, color: readerNightMode ? '#7a736a' : '#a8a196', letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {activeBook?.title || ''}
-                        </div>
-                    </div>
-                </>
-            )}
+            ) : null}
 
             {/* Content */}
             <div ref={contentRef} style={{
@@ -2107,7 +2152,7 @@ const StudyApp: React.FC = () => {
                 overflowX: 'hidden', overflowY: 'auto', overflowAnchor: 'none', overscrollBehavior: 'contain',
                 padding: mode === 'reading' ? '0' : '8px 20px 32px',
                 background: mode === 'reading' ? readerBackground : 'transparent',
-            }} className="no-scrollbar study-scroll-container"
+            }} className={`no-scrollbar study-scroll-container${mode === 'reading' && readerMode === 'scroll' ? ' fade-scroll' : ''}`}
                 onScroll={mode === 'reading' && readerMode === 'scroll' ? handleReaderScroll : undefined}
                 onClick={() => { if (mode === 'reading') toggleBar(); else if (focusedThreadId != null) setFocusedThreadId(null); }}
                 onTouchStart={mode === 'reading' && readerMode === 'paged' ? (e) => {
@@ -2283,8 +2328,8 @@ const StudyApp: React.FC = () => {
             {/* 批注/回应共用阅读区外的编辑纸片。输入控件不再嵌在正文 scroller
                 里，Android 聚焦时就没有可被浏览器自动推入视野的书页祖先。 */}
             {mode === 'reading' && commentingIdx !== null && (
-                <div onClick={(e) => e.stopPropagation()} style={{
-                    position: 'absolute', left: 16, right: 16, bottom: 20 + keyboardInset, zIndex: 32,
+                <div ref={editorCardRef} onClick={(e) => e.stopPropagation()} style={{
+                    position: 'absolute', left: 16, right: 16, bottom: 'calc(20px + var(--keyboard-inset, 0px))', zIndex: 32,
                     background: readerNightMode ? '#2b2924' : '#fff',
                     borderRadius: 14, padding: 14, border: `1px solid ${c.primaryBorder}`,
                     boxShadow: '0 -2px 24px rgba(0,0,0,0.10)',
@@ -2532,7 +2577,7 @@ const StudyApp: React.FC = () => {
                             {contextCustom && (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
                                     <span style={{ fontSize: 12, color: c.muted }}>±</span>
-                                    <input type="number" min={50} max={5000} step={50} value={contextChars}
+                                    <input type="number" min={0} max={5000} value={contextChars}
                                         onChange={e => setContextChars(parseInt(e.target.value || '0', 10))}
                                         style={{ flex: 1, padding: '7px 10px', borderRadius: 8, border: `1px solid ${c.primaryBorder}`, fontSize: 13, outline: 'none',
                                             background: readerNightMode ? 'rgba(255,255,255,0.06)' : '#fff', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }} />

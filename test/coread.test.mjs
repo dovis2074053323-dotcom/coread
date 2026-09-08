@@ -174,7 +174,7 @@ test('context_chars setting: default, persistence, and validation', async () => 
   assert.equal(initial.statusCode, 200);
   assert.equal(initial.body.context_chars, 300);
 
-  const rejected = await request('PUT', '/v1/settings', { context_chars: 10 });
+  const rejected = await request('PUT', '/v1/settings', { context_chars: -1 });
   assert.equal(rejected.statusCode, 400);
   const rejectedHigh = await request('PUT', '/v1/settings', { context_chars: 99999 });
   assert.equal(rejectedHigh.statusCode, 400);
@@ -193,6 +193,14 @@ test('context_chars setting: default, persistence, and validation', async () => 
 
   const custom = await request('PUT', '/v1/settings', { context_chars: 450 });
   assert.equal(custom.body.context_chars, 450);
+
+  const zero = await request('PUT', '/v1/settings', { context_chars: 0 });
+  assert.equal(zero.statusCode, 200);
+  initDb(dbPath);
+  const zeroReloaded = await request('GET', '/v1/settings');
+  assert.equal(zeroReloaded.body.context_chars, 0);
+  const arbitrary = await request('PUT', '/v1/settings', { context_chars: 137 });
+  assert.equal(arbitrary.body.context_chars, 137);
 });
 
 test('extractContext walks paragraphs and stops at book edges', () => {
@@ -220,6 +228,10 @@ test('extractContext walks paragraphs and stops at book edges', () => {
   assert.equal(cross.context_before, 'BBB');
   assert.equal(cross.context_after, 'DDD');
   assert.equal(cross.selected_text, 'BBBBB\n\nCCCCCCCCCC\n\nDDDD');
+
+  const empty = extractContext(paras, { startParaIdx: 2, endParaIdx: 2, startIdx: 3, endIdx: 7 }, 0);
+  assert.equal(empty.context_before, '');
+  assert.equal(empty.context_after, '');
 });
 
 test('human annotation emits a context-rich event; AI write-back does not', async () => {
@@ -278,4 +290,18 @@ test('human annotation emits a context-rich event; AI write-back does not', asyn
   assert.equal(events.length, 2);
   assert.equal(events[1].reply_to, human.body.id);
   assert.equal(events[1].reply_to_comment.comment, '这句话让我想到……');
+
+  await request('PUT', '/v1/settings', { context_chars: 0 });
+  const zeroContext = await request('POST', `/v1/books/${bookId}/comment`, {
+    paragraph_idx: 1,
+    sel_start_idx: 4,
+    sel_end_idx: 9,
+    selected_text: '这里有一句',
+    content: '零上下文首次批注',
+    from_who: 'human',
+  }, { onAnnotationEvent });
+  assert.equal(zeroContext.statusCode, 200);
+  assert.equal(events[2].context_chars, 0);
+  assert.equal(events[2].context_before, '');
+  assert.equal(events[2].context_after, '');
 });
