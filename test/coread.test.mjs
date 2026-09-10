@@ -305,3 +305,80 @@ test('human annotation emits a context-rich event; AI write-back does not', asyn
   assert.equal(events[2].context_before, '');
   assert.equal(events[2].context_after, '');
 });
+
+test('edit book: rename keeps annotations; content replace re-anchors by text', async () => {
+  initDb(dbPath);
+  const created = await request('POST', '/v1/books', {
+    title: '原书名',
+    content: '第一段 alpha\n\n第二段 beta\n\n第三段 gamma',
+  });
+  assert.equal(created.statusCode, 201);
+  const bookId = created.body.book_id;
+
+  // A text-anchored annotation, a reply riding along with it, and progress.
+  const anchored = await request('POST', `/v1/books/${bookId}/comment`, {
+    paragraph_idx: 1, sel_start_idx: 3, sel_end_idx: 7,
+    selected_text: 'beta', content: '一条批注', from_who: 'human',
+  });
+  await request('POST', `/v1/books/${bookId}/comment`, {
+    paragraph_idx: 1, content: '一条回应', from_who: 'ai', reply_to: anchored.body.id,
+  });
+  await request('PATCH', `/v1/books/${bookId}/progress`, { page: 2, char_offset: 1 });
+
+  // raw round-trips the stored paragraphs.
+  const raw = await request('GET', `/v1/books/${bookId}/raw`);
+  assert.equal(raw.statusCode, 200);
+  assert.equal(raw.body.content, '第一段 alpha\n\n第二段 beta\n\n第三段 gamma');
+
+  // Pure rename: title changes, annotations untouched.
+  const renamed = await request('PATCH', `/v1/books/${bookId}`, { title: '新书名' });
+  assert.equal(renamed.statusCode, 200);
+  assert.equal(renamed.body.book.title, '新书名');
+  assert.equal(renamed.body.content_replaced, false);
+  const afterRename = await request('GET', `/v1/books/${bookId}?page=1`);
+  assert.equal(afterRename.body.book.title, '新书名');
+  assert.equal(afterRename.body.comments.length, 2);
+
+  // Empty title is rejected.
+  const emptyTitle = await request('PATCH', `/v1/books/${bookId}`, { title: '   ' });
+  assert.equal(emptyTitle.statusCode, 400);
+
+  // Content replace: insert a new opening paragraph (shifting indices) and edit
+  // the third. 'beta' still exists but has moved from idx 1 to idx 2; its reply
+  // follows it. The 'gamma' paragraph was rewritten, but this book had no
+  // annotation there, so nothing is lost.
+  const edited = await request('PATCH', `/v1/books/${bookId}`, {
+    content: '新开头\n\n第一段 alpha\n\n第二段 beta\n\n第三段 delta',
+  });
+  assert.equal(edited.statusCode, 200);
+  assert.equal(edited.body.content_replaced, true);
+  assert.equal(edited.body.book.total_paragraphs, 4);
+  assert.equal(edited.body.retained_annotations, 2);
+  assert.equal(edited.body.dropped_annotations, 0);
+  const afterEdit = await request('GET', `/v1/books/${bookId}?page=1`);
+  assert.equal(afterEdit.body.comments.length, 2);
+  const moved = afterEdit.body.comments.find(c => c.content === '一条批注');
+  assert.equal(moved.paragraph_idx, 2);
+  assert.equal(moved.selected_text, 'beta');
+  assert.equal(afterEdit.body.paragraphs.find(p => p.idx === 2).content.slice(moved.sel_start_idx, moved.sel_end_idx), 'beta');
+  const reply = afterEdit.body.comments.find(c => c.content === '一条回应');
+  assert.equal(reply.paragraph_idx, 2);
+  assert.equal(reply.reply_to, moved.id);
+
+  // Now delete the text an annotation is anchored to: it can't be located.
+  const dropEdit = await request('PATCH', `/v1/books/${bookId}`, {
+    content: '新开头\n\n第一段 alpha\n\n第三段 delta',
+  });
+  assert.equal(dropEdit.body.retained_annotations, 0);
+  assert.equal(dropEdit.body.dropped_annotations, 2);
+  const afterDrop = await request('GET', `/v1/books/${bookId}?page=1`);
+  assert.equal(afterDrop.body.comments.length, 0);
+
+  // Empty content and missing fields are rejected; 404 for unknown book.
+  const emptyContent = await request('PATCH', `/v1/books/${bookId}`, { content: '   ' });
+  assert.equal(emptyContent.statusCode, 400);
+  const noFields = await request('PATCH', `/v1/books/${bookId}`, {});
+  assert.equal(noFields.statusCode, 400);
+  const missing = await request('PATCH', '/v1/books/999999', { title: 'x' });
+  assert.equal(missing.statusCode, 404);
+});

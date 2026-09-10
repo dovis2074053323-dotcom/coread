@@ -458,6 +458,15 @@ const StudyApp: React.FC = () => {
 
     const [editMode, setEditMode] = useState(false);
     const [selectedBooks, setSelectedBooks] = useState<Set<number>>(new Set());
+    // Book editor (rename + full-text replace). editingBook holds the book being
+    // edited; editLoadedContent is the text as fetched, so a pure rename doesn't
+    // accidentally resend content (which would wipe annotations).
+    const [editingBook, setEditingBook] = useState<Book | null>(null);
+    const [editTitle, setEditTitle] = useState('');
+    const [editContent, setEditContent] = useState('');
+    const [editLoadedContent, setEditLoadedContent] = useState('');
+    const [editLoading, setEditLoading] = useState(false);
+    const [savingEdit, setSavingEdit] = useState(false);
     const batchFileRef = useRef<HTMLInputElement>(null);
     const [showBar, setShowBar] = useState(false);
     const [humanName, setHumanName] = useState(() => localStorage.getItem('coread-human-name') || 'human');
@@ -1805,6 +1814,71 @@ const StudyApp: React.FC = () => {
         setUploading(false);
     };
 
+    const openBookEditor = async (book: Book) => {
+        setEditingBook(book);
+        setEditTitle(book.title);
+        setEditContent('');
+        setEditLoadedContent('');
+        setEditLoading(true);
+        try {
+            const d = await api.fetchBookRaw(book.id);
+            setEditContent(d.content || '');
+            setEditLoadedContent(d.content || '');
+        } catch (e: any) {
+            toast(`读取正文失败: ${e.message}`);
+            setEditingBook(null);
+        }
+        setEditLoading(false);
+    };
+
+    const handleSaveEdit = async () => {
+        if (!editingBook) return;
+        const title = editTitle.trim();
+        if (!title) { toast('书名不能为空'); return; }
+        const titleChanged = title !== editingBook.title;
+        const contentChanged = editContent !== editLoadedContent;
+        if (!titleChanged && !contentChanged) { setEditingBook(null); return; }
+        if (contentChanged && !editContent.trim()) { toast('正文不能为空'); return; }
+        // Replacing the text re-splits paragraphs; comments are re-anchored by
+        // matching their selected text, so most survive — but any whose text is
+        // gone can't be kept. Warn once when a book has annotations at stake.
+        if (contentChanged && (editingBook.comment_count || 0) > 0) {
+            if (!confirm(`改动正文会重新分段。批注会尽量跟着原文位置迁移，只有原文被删改、再也找不到的那些会丢失。继续吗？`)) return;
+        }
+        setSavingEdit(true);
+        try {
+            const payload: { title?: string; content?: string } = {};
+            if (titleChanged) payload.title = title;
+            if (contentChanged) payload.content = editContent;
+            const result = await api.updateBook(editingBook.id, payload);
+            if (contentChanged) {
+                // Cached paragraphs/pagebreaks/comments are now stale.
+                try {
+                    for (let i = localStorage.length - 1; i >= 0; i--) {
+                        const key = localStorage.key(i);
+                        if (key?.startsWith(`pagebreaks-v4-${editingBook.id}-`) || key?.startsWith(`pagebreaks-v3-${editingBook.id}-`)) localStorage.removeItem(key);
+                    }
+                } catch {}
+                idbDelPrefix(`pagebreaks-v4-${editingBook.id}-`);
+                idbDelPrefix(`pagebreaks-v3-${editingBook.id}-`);
+                idbDelParas(`paras-v1-${editingBook.id}`);
+                idbDelParas(`comments-v1-${editingBook.id}`);
+            }
+            if (contentChanged) {
+                const dropped = result?.dropped_annotations || 0;
+                const retained = result?.retained_annotations || 0;
+                toast(dropped > 0
+                    ? `已保存，保留 ${retained} 条批注，${dropped} 条因原文改动无法定位`
+                    : (retained > 0 ? `已保存，${retained} 条批注已跟随原文` : '已保存修改'));
+            } else {
+                toast('已重命名');
+            }
+            setEditingBook(null); setEditMode(false); setSelectedBooks(new Set());
+            void loadBooks(false);
+        } catch (e: any) { toast(`保存失败: ${e.message}`); }
+        setSavingEdit(false);
+    };
+
     const backToShelf = () => {
         const pending = persistCurrentPosition();
         setMode('shelf'); setActiveBook(null); setParagraphs([]); setComments([]);
@@ -2110,6 +2184,15 @@ const StudyApp: React.FC = () => {
                     <button onClick={openBindingPicker} style={btnBase} aria-label="绑定会话">
                         <BindIcon color={c.primary} />
                     </button>
+                    {editMode && selectedBooks.size === 1 && (
+                        <button onClick={() => {
+                            const id = [...selectedBooks][0];
+                            const book = books.find(b => b.id === id);
+                            if (book) void openBookEditor(book);
+                        }} style={btnBase} aria-label="编辑这本书">
+                            <EditIcon color={c.primary} />
+                        </button>
+                    )}
                     {editMode && selectedBooks.size > 0 && (
                         <button onClick={async () => {
                             if (!confirm(`删除选中的 ${selectedBooks.size} 本书？`)) return;
@@ -2761,6 +2844,47 @@ const StudyApp: React.FC = () => {
                             <button onClick={handleUpload} disabled={uploading}
                                 style={{ flex: 1, padding: '10px 0', borderRadius: 14, border: 'none', background: c.primary, fontSize: 13, color: 'white', cursor: 'pointer', fontWeight: 600, opacity: uploading ? 0.6 : 1 }}>
                                 {uploading ? '上传中...' : '添加到书架'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Book editor overlay — rename and/or replace full text */}
+            {editingBook && (
+                <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.3)', backdropFilter: 'blur(4px)', zIndex: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+                    onClick={() => { if (!savingEdit) setEditingBook(null); }}>
+                    <div onClick={(e) => e.stopPropagation()} style={{
+                        background: 'rgba(255,255,255,0.97)', backdropFilter: 'blur(20px)', borderRadius: 24,
+                        padding: 24, width: '100%', maxWidth: 420, border: `1px solid ${c.primaryBorder}`, boxShadow: '0 12px 40px rgba(0,0,0,0.1)',
+                        display: 'flex', flexDirection: 'column', maxHeight: '86vh',
+                    }}>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: c.primaryDark, marginBottom: 16 }}>编辑《{editingBook.title}》</div>
+
+                        <input value={editTitle} onChange={e => setEditTitle(e.target.value)} placeholder="书名"
+                            style={{ width: '100%', padding: '10px 14px', borderRadius: 12, border: `1px solid ${c.primaryBorder}`, fontSize: 14, outline: 'none', marginBottom: 12, background: c.primaryBg, color: '#333' }} />
+
+                        {editLoading ? (
+                            <div style={{ textAlign: 'center', padding: '40px 0', color: '#bbb', fontSize: 13 }}>读取正文中…</div>
+                        ) : (
+                            <>
+                                <textarea value={editContent} onChange={e => setEditContent(e.target.value)}
+                                    placeholder="正文（段落之间用空行分隔）"
+                                    style={{ width: '100%', flex: 1, minHeight: 200, padding: '10px 14px', borderRadius: 12, border: `1px solid ${c.primaryBorder}`, fontSize: 13, outline: 'none', resize: 'vertical', background: c.primaryBg, color: '#333', lineHeight: 1.6, fontFamily: READER_SERIF }} />
+                                {editContent !== editLoadedContent && (editingBook.comment_count || 0) > 0 && (
+                                    <div style={{ fontSize: 11, color: '#c88', marginTop: 8, lineHeight: 1.5 }}>
+                                        改动正文会重新分段。这 {editingBook.comment_count} 条批注会尽量跟着原文迁移，只有原文被删改、找不到了的才会丢失。
+                                    </div>
+                                )}
+                            </>
+                        )}
+
+                        <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+                            <button onClick={() => setEditingBook(null)} disabled={savingEdit}
+                                style={{ flex: 1, padding: '10px 0', borderRadius: 14, border: `1px solid ${c.primaryBorder}`, background: 'white', fontSize: 13, color: '#999', cursor: 'pointer' }}>取消</button>
+                            <button onClick={handleSaveEdit} disabled={savingEdit || editLoading}
+                                style={{ flex: 1, padding: '10px 0', borderRadius: 14, border: 'none', background: c.primary, fontSize: 13, color: 'white', cursor: 'pointer', fontWeight: 600, opacity: (savingEdit || editLoading) ? 0.6 : 1 }}>
+                                {savingEdit ? '保存中…' : '保存'}
                             </button>
                         </div>
                     </div>

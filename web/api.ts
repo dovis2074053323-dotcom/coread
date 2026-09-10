@@ -49,6 +49,9 @@ export const api = {
     request('/v1/books', { method: 'POST', body: JSON.stringify(data) }),
   deleteBook: (bookId: number) =>
     request(`/v1/books/${bookId}`, { method: 'DELETE' }),
+  fetchBookRaw: (bookId: number) => request(`/v1/books/${bookId}/raw`),
+  updateBook: (bookId: number, data: { title?: string; content?: string }) =>
+    request(`/v1/books/${bookId}`, { method: 'PATCH', body: JSON.stringify(data) }),
   fetchBookToc: (bookId: number) =>
     request(`/v1/books/${bookId}/toc`),
   exportBook: async (bookId: number, format = 'epub') => {
