@@ -21,7 +21,7 @@ async function request(method, url, body, extraOpts = {}) {
   const req = Readable.from(body === undefined ? [] : [JSON.stringify(body)]);
   req.method = method;
   req.url = url;
-  req.headers = { 'x-owner-key': 'test-owner' };
+  req.headers = { 'x-owner-key': 'test-owner', ...(extraOpts.headers || {}) };
 
   let statusCode = 200;
   const headers = {};
@@ -64,6 +64,7 @@ test('persists progress, one bookmark, and selection/reply threads', async () =>
   const migrated = getDb(true);
   assert.ok(migrated.pragma('table_info(book_progress)').some(column => column.name === 'char_offset'));
   assert.ok(migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'book_bookmarks'").get());
+  assert.ok(migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'book_notes'").get());
   migrated.close();
   rmSync(legacyRoot, { recursive: true, force: true });
   initDb(dbPath);
@@ -381,4 +382,100 @@ test('edit book: rename keeps annotations; content replace re-anchors by text', 
   assert.equal(noFields.statusCode, 400);
   const missing = await request('PATCH', '/v1/books/999999', { title: 'x' });
   assert.equal(missing.statusCode, 404);
+});
+
+
+test('typed reading notes preserve ownership and one-call recovery state', async () => {
+  initDb(dbPath);
+  process.env.MORROW_COREAD_BRIDGE_SECRET = 'test-coread-bridge';
+
+  const created = await request('POST', '/v1/books', {
+    title: 'Long reading state fixture',
+    content: '第一章\n\n人物登场\n\n第二章\n\n伏笔出现\n\n第三章\n\n线索回收',
+  });
+  assert.equal(created.statusCode, 201);
+  const bookId = created.body.book_id;
+  await request('PATCH', `/v1/books/${bookId}/progress`, { page: 3, char_offset: 2 });
+  await request('PUT', `/v1/books/${bookId}/bookmark`, { page: 2, paragraph_idx: 3, char_offset: 1 });
+
+  const forgedOwner = await request('POST', `/v1/books/${bookId}/notes`, {
+    kind: 'summary',
+    owner_id: 'gpt',
+    subject: '第一章',
+    body: '第一章详细总结',
+    scope_start_page: 1,
+    scope_end_page: 1,
+  });
+  assert.equal(forgedOwner.statusCode, 201);
+  assert.equal(forgedOwner.body.note.owner_id, 'user');
+
+  const ccHeaders = { 'x-coread-owner': 'claude-code', 'x-morrow-coread-token': 'test-coread-bridge' };
+  const gptHeaders = { 'x-coread-owner': 'gpt', 'x-morrow-coread-token': 'test-coread-bridge' };
+  await request('POST', `/v1/books/${bookId}/notes`, {
+    kind: 'summary', subject: '第二章', body: '第二章详细总结', scope_start_page: 2, scope_end_page: 2,
+  }, { headers: ccHeaders });
+  await request('POST', `/v1/books/${bookId}/notes`, {
+    kind: 'summary', subject: '第三章', body: '第三章详细总结', scope_start_page: 3, scope_end_page: 3,
+  }, { headers: ccHeaders });
+  await request('POST', `/v1/books/${bookId}/notes`, {
+    kind: 'character', subject: '阿宁', body: '表面冷静，但我觉得她在隐瞒害怕。', anchor_page: 3,
+  }, { headers: ccHeaders });
+  await request('POST', `/v1/books/${bookId}/notes`, {
+    kind: 'impression', subject: '当前感受', body: '我不信任那个证人。', anchor_page: 3,
+  }, { headers: gptHeaders });
+
+  const activeThread = await request('POST', `/v1/books/${bookId}/notes`, {
+    kind: 'thread', subject: '钥匙', body: '原猜测：钥匙属于失踪者。', anchor_page: 2,
+  }, { headers: ccHeaders });
+  const wrongOwner = await request('POST', `/v1/books/${bookId}/notes/${activeThread.body.note.id}/resolve`, {
+    resolution: '伪造的结论',
+  }, { headers: gptHeaders });
+  assert.equal(wrongOwner.statusCode, 403);
+
+  const resolved = await request('POST', `/v1/books/${bookId}/notes/${activeThread.body.note.id}/resolve`, {
+    resolution: '真相：钥匙属于管家。',
+    page: 3,
+  }, { headers: ccHeaders });
+  assert.equal(resolved.statusCode, 200);
+  assert.equal(resolved.body.note.body, '原猜测：钥匙属于失踪者。');
+  assert.equal(resolved.body.note.resolution, '真相：钥匙属于管家。');
+  assert.equal(resolved.body.note.status, 'resolved');
+
+  await request('POST', `/v1/books/${bookId}/notes`, {
+    kind: 'thread', subject: '窗边脚印', body: '猜测脚印来自第二个人。', anchor_page: 3,
+  });
+
+  const restored = await request('GET', `/v1/books/${bookId}/reading-state`);
+  assert.equal(restored.statusCode, 200);
+  const state = restored.body.state;
+  assert.deepEqual(
+    {
+      progress: state.position.progress,
+      bookmark: state.position.bookmark,
+    },
+    {
+      progress: { page: 3, paragraph_idx: 3, char_offset: 2, updated_at: state.position.progress.updated_at },
+      bookmark: { page: 2, paragraph_idx: 3, char_offset: 1, created_at: state.position.bookmark.created_at, updated_at: state.position.bookmark.updated_at },
+    },
+  );
+  assert.deepEqual(state.recent.map((note) => note.subject), ['第三章', '第二章']);
+  assert.deepEqual(state.history.map((note) => note.subject), ['第一章']);
+  assert.equal(state.characters[0].body, '表面冷静，但我觉得她在隐瞒害怕。');
+  assert.equal(state.impressions[0].owner_id, 'gpt');
+  assert.equal(state.threads.active[0].body, '猜测脚印来自第二个人。');
+  assert.equal(state.threads.recent_resolved[0].body, '原猜测：钥匙属于失踪者。');
+  assert.equal(state.threads.recent_resolved[0].resolution, '真相：钥匙属于管家。');
+  assert.ok(JSON.stringify(state).length <= state.limits.max_chars);
+  assert.equal(Object.hasOwn(state, 'comments'), false);
+  assert.equal(Object.hasOwn(state, 'diary'), false);
+
+  const listed = await request('GET', `/v1/books/${bookId}/notes?kind=thread&status=resolved`);
+  assert.equal(listed.body.notes.length, 1);
+  assert.equal(listed.body.notes[0].id, activeThread.body.note.id);
+
+  const deleted = await request('DELETE', `/v1/books/${bookId}`);
+  assert.equal(deleted.statusCode, 200);
+  const db = getDb(true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM book_notes WHERE book_id = ?').get(bookId).count, 0);
+  db.close();
 });

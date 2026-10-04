@@ -68,6 +68,20 @@ export const api = {
   fetchBookBookmark: (bookId: number) => request(`/v1/books/${bookId}/bookmark`),
   updateBookBookmark: (bookId: number, data: { page: number; paragraph_idx: number; char_offset?: number }) =>
     request(`/v1/books/${bookId}/bookmark`, { method: 'PUT', body: JSON.stringify(data) }),
+  fetchReadingState: (bookId: number) =>
+    request(`/v1/books/${bookId}/reading-state`),
+  upsertReadingNote: (bookId: number, data: any, noteId?: number) =>
+    request(`/v1/books/${bookId}/notes${noteId ? `/${noteId}` : ''}`, {
+      method: noteId ? 'PUT' : 'POST',
+      body: JSON.stringify(data),
+    }),
+  resolveReadingThread: (bookId: number, noteId: number, resolution: string, page?: number) =>
+    request(`/v1/books/${bookId}/notes/${noteId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ resolution, page }),
+    }),
+  deleteReadingNote: (bookId: number, noteId: number) =>
+    request(`/v1/books/${bookId}/notes/${noteId}`, { method: 'DELETE' }),
 
   // 共读绑定：批注持续投给哪个已有的 cc 聊天会话（CoRead Final）。
   fetchCoreadBinding: () => morrowRequest('/api/coread/binding'),

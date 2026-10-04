@@ -25,7 +25,8 @@ test('tools/list exposes the compact MCP schemas', () => {
   const byName = Object.fromEntries(tools.map(item => [item.name, item]));
   assert.deepEqual(tools.map(item => item.name), [
     'search_books', 'list_books', 'read_book', 'add_comment', 'list_comments',
-    'get_toc', 'import_book', 'delete_comment', 'get_settings', 'update_progress',
+    'get_toc', 'import_book', 'delete_comment', 'get_settings', 'get_reading_state',
+    'list_reading_notes', 'upsert_reading_note', 'resolve_reading_thread', 'update_progress',
   ]);
   assert.equal(byName.search_books.description, 'Find books by title.');
   assert.deepEqual(byName.search_books.inputSchema.properties, {
@@ -120,4 +121,33 @@ test('import and settings receipts stay minimal', () => {
   const imported = handleTool('import_book', { title: 'Imported', content: 'one\n\ntwo' });
   assert.deepEqual(Object.keys(imported), ['book_id']);
   assert.deepEqual(Object.keys(handleTool('get_settings', {})), ['context_chars']);
+});
+
+
+test('reading-state MCP tools bind note ownership to claude-code', () => {
+  const bookId = seedBook('MCP reading state fixture', ['chapter', 'body']);
+  const created = handleTool('upsert_reading_note', {
+    book_id: bookId,
+    kind: 'thread',
+    subject: '门锁',
+    body: '原猜测：门从里面锁上。',
+    anchor_page: 1,
+    owner_id: 'gpt',
+  });
+  assert.equal(created.note.owner_id, 'claude-code');
+
+  const resolved = handleTool('resolve_reading_thread', {
+    id: created.note.id,
+    resolution: '结论：备用钥匙从窗外递入。',
+    page: 2,
+  });
+  assert.equal(resolved.note.body, '原猜测：门从里面锁上。');
+  assert.equal(resolved.note.resolution, '结论：备用钥匙从窗外递入。');
+
+  const listed = handleTool('list_reading_notes', { book_id: bookId, kind: 'thread', status: 'resolved' });
+  assert.equal(listed.notes.length, 1);
+  const state = handleTool('get_reading_state', { book_id: bookId });
+  assert.equal(state.threads.recent_resolved[0].body, '原猜测：门从里面锁上。');
+  assert.equal(state.threads.recent_resolved[0].resolution, '结论：备用钥匙从窗外递入。');
+  assert.ok(JSON.stringify(state).length <= state.limits.max_chars);
 });

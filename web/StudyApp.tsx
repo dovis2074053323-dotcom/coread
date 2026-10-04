@@ -53,6 +53,31 @@ interface Book {
 interface Paragraph { idx: number; content: string; }
 interface Comment { id: number; book_id: number; paragraph_idx: number; sel_end_para_idx: number | null; sel_start_idx: number | null; sel_end_idx: number | null; selected_text: string | null; from_who: string; content: string; created_at: string; reply_to: number | null; }
 interface Bookmark { page: number; paragraph_idx: number; char_offset: number; created_at?: string | null; updated_at?: string | null; }
+type ReadingNoteKind = 'summary' | 'character' | 'thread' | 'impression';
+interface ReadingNote {
+    id: number;
+    book_id: number;
+    kind: ReadingNoteKind;
+    owner_id: 'shared' | 'user' | 'claude-code' | 'gpt';
+    subject: string | null;
+    body: string;
+    scope_start_page: number | null;
+    scope_end_page: number | null;
+    anchor_page: number | null;
+    status: 'active' | 'resolved' | 'archived';
+    resolution: string | null;
+    created_at: string;
+    updated_at: string;
+}
+interface ReadingState {
+    book: { id: number; title: string; total_paragraphs: number };
+    position: { progress: { page: number; paragraph_idx: number; char_offset: number } | null; bookmark: Bookmark | null };
+    recent: ReadingNote[];
+    history: ReadingNote[];
+    characters: ReadingNote[];
+    threads: { active: ReadingNote[]; recent_resolved: ReadingNote[] };
+    impressions: ReadingNote[];
+}
 interface PageBreak { paraIndex: number; offset: number; }
 interface PageFragment extends Paragraph { sourceIdx: number; startOffset: number; endOffset: number; isPartialStart: boolean; isPartialEnd: boolean; }
 type ReaderMode = 'paged' | 'scroll';
@@ -476,6 +501,14 @@ const StudyApp: React.FC = () => {
     const [showFontPanel, setShowFontPanel] = useState(false);
     const [showBookmarkMenu, setShowBookmarkMenu] = useState(false);
     const [showMoreMenu, setShowMoreMenu] = useState(false);
+    const [showReadingState, setShowReadingState] = useState(false);
+    const [readingState, setReadingState] = useState<ReadingState | null>(null);
+    const [readingStateLoading, setReadingStateLoading] = useState(false);
+    const [readingStateError, setReadingStateError] = useState('');
+    const [readingNoteKind, setReadingNoteKind] = useState<ReadingNoteKind>('impression');
+    const [readingNoteSubject, setReadingNoteSubject] = useState('');
+    const [readingNoteBody, setReadingNoteBody] = useState('');
+    const [readingNoteSaving, setReadingNoteSaving] = useState(false);
     const [readerBrightness, setReaderBrightness] = useState(() => Math.max(30, Math.min(100, parseInt(localStorage.getItem('coread-brightness') || '100', 10) || 100)));
     const [readerMode, setReaderMode] = useState<ReaderMode>(() => storedChoice('coread-reader-mode', ['paged', 'scroll'] as const, 'paged'));
     const [readerLineSpacing, setReaderLineSpacing] = useState<ReaderLineSpacing>(() => storedChoice('coread-line-spacing', ['tight', 'normal', 'loose'] as const, 'normal'));
@@ -1700,6 +1733,72 @@ const StudyApp: React.FC = () => {
         window.open(coreadPath(`/v1/books/${activeBook.id}/export?format=${format}`), '_blank');
     };
 
+    const loadReadingState = async (bookId = activeBook?.id) => {
+        if (!bookId) return;
+        setReadingStateLoading(true);
+        setReadingStateError('');
+        try {
+            const result = await api.fetchReadingState(bookId);
+            setReadingState(result.state || null);
+        } catch (e: any) {
+            setReadingStateError(e.message || '共读状态加载失败');
+        } finally {
+            setReadingStateLoading(false);
+        }
+    };
+
+    const openReadingState = () => {
+        if (!activeBook) return;
+        setShowMoreMenu(false);
+        setShowBar(false);
+        setShowReadingState(true);
+        void loadReadingState(activeBook.id);
+    };
+
+    const saveReadingNote = async () => {
+        if (!activeBook || !readingNoteBody.trim() || readingNoteSaving) return;
+        setReadingNoteSaving(true);
+        setReadingStateError('');
+        try {
+            await api.upsertReadingNote(activeBook.id, {
+                kind: readingNoteKind,
+                subject: readingNoteSubject.trim() || undefined,
+                body: readingNoteBody.trim(),
+                anchor_page: page,
+                ...(readingNoteKind === 'summary' ? { scope_start_page: page, scope_end_page: page } : {}),
+            });
+            setReadingNoteSubject('');
+            setReadingNoteBody('');
+            await loadReadingState(activeBook.id);
+        } catch (e: any) {
+            setReadingStateError(e.message || '共读笔记保存失败');
+        } finally {
+            setReadingNoteSaving(false);
+        }
+    };
+
+    const resolveUserThread = async (note: ReadingNote) => {
+        if (!activeBook || note.owner_id !== 'user') return;
+        const resolution = window.prompt('这条伏笔怎样解决了？');
+        if (!resolution?.trim()) return;
+        try {
+            await api.resolveReadingThread(activeBook.id, note.id, resolution.trim(), page);
+            await loadReadingState(activeBook.id);
+        } catch (e: any) {
+            setReadingStateError(e.message || '伏笔状态更新失败');
+        }
+    };
+
+    const deleteUserReadingNote = async (note: ReadingNote) => {
+        if (!activeBook || note.owner_id !== 'user' || !window.confirm('删除这条共读笔记？')) return;
+        try {
+            await api.deleteReadingNote(activeBook.id, note.id);
+            await loadReadingState(activeBook.id);
+        } catch (e: any) {
+            setReadingStateError(e.message || '共读笔记删除失败');
+        }
+    };
+
     const jumpToChapter = (chapter: { idx: number; page: number; title: string }) => {
         if (!activeBook) return;
         const targetIdx = chapter.idx ?? chapter.page;
@@ -1883,6 +1982,7 @@ const StudyApp: React.FC = () => {
         const pending = persistCurrentPosition();
         setMode('shelf'); setActiveBook(null); setParagraphs([]); setComments([]);
         setFocusedThreadId(null); setReplyingTo(null); setCommentingIdx(null); setSelRange(null); setFloatingBar(null); setShowToc(false); setTocChapters([]);
+        setShowReadingState(false); setReadingState(null); setReadingStateError('');
         setBookmark(null); setReturnPoint(null);
         Promise.resolve(pending).finally(() => { void loadBooks(false); });
     };
@@ -1927,6 +2027,42 @@ const StudyApp: React.FC = () => {
         const heading = trimmed.match(/^(#{1,6})\s+/);
         return !!(heading && heading[1].length <= 2);
     };
+
+    const readingOwnerLabel = (owner: ReadingNote['owner_id']) => (
+        owner === 'user' ? '我' : owner === 'claude-code' ? aiName : owner === 'gpt' ? 'Milo' : '共读'
+    );
+    const renderReadingNoteSection = (title: string, notes: ReadingNote[], resolved = false) => (
+        <section style={{ marginTop: 18 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: c.primaryDark, marginBottom: 8 }}>{title}</div>
+            {notes.length === 0 ? (
+                <div style={{ fontSize: 12, color: c.muted, padding: '8px 0' }}>暂无</div>
+            ) : notes.map(note => (
+                <article key={note.id} style={{
+                    padding: '11px 12px', marginBottom: 8, borderRadius: 12,
+                    border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.62)',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
+                        <strong style={{ fontSize: 12, color: readerNightMode ? READER_INK_NIGHT : READER_INK }}>{note.subject || '未命名'}</strong>
+                        <small style={{ color: c.muted, fontSize: 10 }}>{readingOwnerLabel(note.owner_id)}{note.anchor_page ? ` · p.${note.anchor_page}` : ''}</small>
+                    </div>
+                    <div style={{ fontSize: 12, lineHeight: 1.65, whiteSpace: 'pre-wrap', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>{note.body}</div>
+                    {note.resolution && (
+                        <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${c.primaryBorder}`, fontSize: 12, lineHeight: 1.65, color: c.primary }}>
+                            结论：{note.resolution}
+                        </div>
+                    )}
+                    {note.owner_id === 'user' && (
+                        <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+                            {note.kind === 'thread' && !resolved && (
+                                <button type="button" onClick={() => resolveUserThread(note)} style={{ border: 0, background: 'transparent', color: c.primary, fontSize: 11, padding: 0, cursor: 'pointer' }}>标记已解</button>
+                            )}
+                            <button type="button" onClick={() => deleteUserReadingNote(note)} style={{ border: 0, background: 'transparent', color: c.muted, fontSize: 11, padding: 0, cursor: 'pointer' }}>删除</button>
+                        </div>
+                    )}
+                </article>
+            ))}
+        </section>
+    );
 
     const renderHighlighted = (text: string, paraIdx: number, highlights: Comment[]) => {
         const positioned = highlights
@@ -2695,7 +2831,7 @@ const StudyApp: React.FC = () => {
                         </button>
                     </div>
 
-                    {/* 更多操作菜单 — 目前只有导出，低频操作放这里，不再常驻底栏 */}
+                    {/* 更多操作菜单 — 共读状态与导出都属于低频操作，不常驻底栏 */}
                     <div onClick={(e) => e.stopPropagation()} style={{
                         position: 'absolute', bottom: showBar ? 90 : -300, right: 16, zIndex: 20, minWidth: 150,
                         background: readerNightMode ? '#2b2924' : '#fff',
@@ -2706,6 +2842,13 @@ const StudyApp: React.FC = () => {
                         transition: 'opacity 0.25s ease, transform 0.25s ease, bottom 0.3s ease',
                         pointerEvents: showMoreMenu && showBar ? 'auto' : 'none',
                     }}>
+                        <button onClick={openReadingState}
+                            style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer',
+                                padding: '10px 12px', borderRadius: 10, fontSize: 13, fontWeight: 600,
+                                color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>
+                            共读状态
+                        </button>
+                        <div style={{ height: 1, background: c.primaryBorder, margin: '3px 8px 5px' }} />
                         <div style={{ fontSize: 10, color: c.muted, padding: '4px 12px 6px', letterSpacing: 0.3 }}>导出</div>
                         <button onClick={() => handleExport('epub')}
                             style={{ width: '100%', textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer',
@@ -2727,6 +2870,75 @@ const StudyApp: React.FC = () => {
                         </button>
                     </div>
                 </>
+            )}
+
+            {/* Durable reading state — a secondary card, not another bottom sheet. */}
+            {showReadingState && (
+                <div style={{ position: 'absolute', inset: 0, zIndex: 35, background: 'rgba(0,0,0,0.34)', backdropFilter: 'blur(5px)', padding: 12, display: 'flex', justifyContent: 'center' }}
+                    onClick={() => setShowReadingState(false)}>
+                    <div onClick={(e) => e.stopPropagation()} style={{
+                        width: '100%', maxWidth: 520, height: '100%', overflowY: 'auto',
+                        background: readerDisplayBackground, borderRadius: 18, padding: '18px 16px 28px',
+                        boxShadow: '0 12px 48px rgba(0,0,0,0.18)', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT,
+                    }}>
+                        <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+                            <div>
+                                <div style={{ fontSize: 15, fontWeight: 700, color: readerNightMode ? READER_INK_NIGHT : c.primaryDark }}>共读状态</div>
+                                <div style={{ fontSize: 10, color: c.muted, marginTop: 3 }}>{activeBook?.title}</div>
+                            </div>
+                            <button type="button" onClick={() => setShowReadingState(false)} aria-label="关闭共读状态"
+                                style={{ width: 32, height: 32, borderRadius: '50%', border: `1px solid ${c.primaryBorder}`, background: 'transparent', color: c.muted, cursor: 'pointer' }}>×</button>
+                        </header>
+
+                        {readingStateError && <div style={{ color: '#b85d52', fontSize: 12, marginBottom: 10 }}>{readingStateError}</div>}
+                        {readingStateLoading && !readingState && <div style={{ color: c.muted, fontSize: 12, padding: '24px 0' }}>正在整理这本书的共读状态…</div>}
+
+                        {readingState && (
+                            <>
+                                <section style={{ padding: 12, borderRadius: 12, border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.62)' }}>
+                                    <div style={{ fontSize: 11, color: c.muted, marginBottom: 5 }}>精确阅读位置</div>
+                                    <div style={{ fontSize: 13, fontWeight: 600 }}>
+                                        {readingState.position.progress
+                                            ? `段落 ${readingState.position.progress.paragraph_idx} · 字符 ${readingState.position.progress.char_offset}`
+                                            : '尚未记录进度'}
+                                    </div>
+                                    <div style={{ fontSize: 11, color: c.muted, marginTop: 4 }}>
+                                        {readingState.position.bookmark
+                                            ? `书签 p.${readingState.position.bookmark.page} · 段落 ${readingState.position.bookmark.paragraph_idx} · 字符 ${readingState.position.bookmark.char_offset}`
+                                            : '未设置书签'}
+                                    </div>
+                                </section>
+                                {renderReadingNoteSection('最近两章', readingState.recent)}
+                                {renderReadingNoteSection('较早章节摘要', readingState.history)}
+                                {renderReadingNoteSection('人物与判断', readingState.characters)}
+                                {renderReadingNoteSection('未解伏笔', readingState.threads.active)}
+                                {renderReadingNoteSection('最近已解伏笔', readingState.threads.recent_resolved, true)}
+                                {renderReadingNoteSection('主观印象', readingState.impressions)}
+                            </>
+                        )}
+
+                        <section style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${c.primaryBorder}` }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: readerNightMode ? READER_INK_NIGHT : c.primaryDark, marginBottom: 9 }}>记一条 · p.{page}</div>
+                            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                                <select value={readingNoteKind} onChange={(event) => setReadingNoteKind(event.target.value as ReadingNoteKind)}
+                                    style={{ width: 104, padding: '9px 8px', borderRadius: 10, border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? '#2b2924' : '#fff', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>
+                                    <option value="impression">印象</option>
+                                    <option value="thread">伏笔</option>
+                                    <option value="character">人物</option>
+                                    <option value="summary">摘要</option>
+                                </select>
+                                <input value={readingNoteSubject} onChange={(event) => setReadingNoteSubject(event.target.value)} placeholder="标题（可选）"
+                                    style={{ flex: 1, minWidth: 0, padding: '9px 10px', borderRadius: 10, border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? 'rgba(255,255,255,0.05)' : '#fff', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }} />
+                            </div>
+                            <textarea value={readingNoteBody} onChange={(event) => setReadingNoteBody(event.target.value)} placeholder="写下判断、猜测或当下感受…"
+                                style={{ width: '100%', minHeight: 86, boxSizing: 'border-box', resize: 'vertical', padding: '10px 11px', borderRadius: 10, border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? 'rgba(255,255,255,0.05)' : '#fff', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, fontFamily: READER_SERIF, lineHeight: 1.6 }} />
+                            <button type="button" onClick={saveReadingNote} disabled={readingNoteSaving || !readingNoteBody.trim()}
+                                style={{ width: '100%', marginTop: 9, padding: '10px 0', border: 0, borderRadius: 12, background: c.primary, color: '#fff', fontWeight: 600, cursor: readingNoteSaving || !readingNoteBody.trim() ? 'default' : 'pointer', opacity: readingNoteSaving || !readingNoteBody.trim() ? 0.55 : 1 }}>
+                                {readingNoteSaving ? '保存中…' : '保存到这本书'}
+                            </button>
+                        </section>
+                    </div>
+                </div>
             )}
 
             {/* Settings overlay */}
