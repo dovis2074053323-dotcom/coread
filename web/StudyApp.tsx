@@ -2140,7 +2140,9 @@ const StudyApp: React.FC = () => {
     };
 
     const residentLabelById = useMemo(() => new Map(
-        residentCards.map(card => [card.id, card.label || card.id]),
+        residentCards
+            .filter(card => card.id === 'claude-code' || card.id === 'gpt')
+            .map(card => [card.id, card.label || card.id]),
     ), [residentCards]);
     const readingOwnerLabel = (owner: string) => (
         owner === 'user' ? 'vv'
@@ -2151,17 +2153,9 @@ const StudyApp: React.FC = () => {
     const readingKindLabel = (kind: ReadingNoteKind) => (
         kind === 'impression' ? '印象' : kind === 'character' ? '人物' : kind === 'thread' ? '伏笔' : '总结'
     );
-    const readingOwnerIds = useMemo(() => {
-        const registered = residentCards.map(card => card.id);
-        const known = new Set(['user', ...registered]);
-        const extras = Array.from(new Set(readingNotes.map(note => note.owner_id)))
-            .filter(owner => !known.has(owner) && owner !== 'shared')
-            .sort((a, b) => a.localeCompare(b));
-        const owners = ['user', ...registered, ...extras];
-        if (readingNotes.some(note => note.owner_id === 'shared')) owners.push('shared');
-        return owners;
-    }, [readingNotes, residentCards]);
+    const readingOwnerIds = ['user', 'claude-code', 'gpt'];
     const filteredReadingNotes = useMemo(() => readingNotes.filter(note => {
+        if (!readingOwnerIds.includes(note.owner_id) && note.owner_id !== 'shared') return false;
         if (readingOwnerFilter !== 'all' && note.owner_id !== readingOwnerFilter) return false;
         if (note.kind !== readingKindFilter || note.status === 'archived') return false;
         if (note.kind === 'thread' && note.status !== readingThreadFilter) return false;

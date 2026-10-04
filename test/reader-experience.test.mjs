@@ -39,11 +39,11 @@ test('reading toolbar has no duplicate close control', () => {
   assert.match(readerSource, /setShowBookmarkMenu\(false\); setShowFontPanel\(false\); setShowMoreMenu\(false\)/);
 });
 
-test('reading-note owners follow Morrow resident cards instead of a Coread resident id map', () => {
+test('reading-note owners are limited to vv, Claude Code, and GPT while resident labels still follow their cards', () => {
   assert.match(readerSource, /api\.fetchResidents\(\)/);
-  assert.match(readerSource, /residentCards\.map\(card => \[card\.id, card\.label \|\| card\.id\]\)/);
-  assert.doesNotMatch(readerSource, /owner === 'claude-code'/);
-  assert.doesNotMatch(readerSource, /owner === 'gpt'/);
+  assert.match(readerSource, /card\.id === 'claude-code' \|\| card\.id === 'gpt'/);
+  assert.match(readerSource, /const readingOwnerIds = \['user', 'claude-code', 'gpt'\]/);
+  assert.doesNotMatch(readerSource, /residentCards\.map\(card => card\.id\)/);
 });
 
 test('scroll reader uses a touch-transparent mask edge fade, paged reader does not', () => {
