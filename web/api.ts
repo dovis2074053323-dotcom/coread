@@ -97,4 +97,5 @@ export const api = {
     morrowRequest('/api/coread/binding', { method: 'PUT', body: JSON.stringify({ sessionId }) }),
   clearCoreadBinding: () => morrowRequest('/api/coread/binding', { method: 'DELETE' }),
   fetchCoreadBindingCandidates: () => morrowRequest('/api/coread/candidate-sessions'),
+  fetchResidents: () => morrowRequest('/api/residents'),
 };

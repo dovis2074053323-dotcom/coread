@@ -100,6 +100,7 @@ interface CoreadBinding {
     session: { id: string; title: string; lastActivityAt: number } | null;
 }
 interface BindingCandidate { id: string; title: string; lastActivityAt: number; }
+interface ResidentCard { id: string; label: string; enabled?: boolean; order?: number; }
 interface ReplyNotice {
     id: number;
     paragraph_idx: number;
@@ -449,6 +450,11 @@ const StudyApp: React.FC = () => {
         api.fetchCoreadBinding().then((d: any) => setCoreadBinding(d)).catch(() => setCoreadBinding(null));
     }, []);
     useEffect(() => { refreshCoreadBinding(); }, [refreshCoreadBinding]);
+    useEffect(() => {
+        api.fetchResidents()
+            .then((d: any) => setResidentCards(Array.isArray(d?.residents) ? d.residents : []))
+            .catch(() => setResidentCards([]));
+    }, []);
     const openBindingPicker = useCallback(() => {
         setBindingError(null);
         setShowBindingPicker(true);
@@ -513,6 +519,7 @@ const StudyApp: React.FC = () => {
     const [showReadingState, setShowReadingState] = useState(false);
     const [readingState, setReadingState] = useState<ReadingState | null>(null);
     const [readingNotes, setReadingNotes] = useState<ReadingNote[]>([]);
+    const [residentCards, setResidentCards] = useState<ResidentCard[]>([]);
     const [readingStateLoading, setReadingStateLoading] = useState(false);
     const [readingStateError, setReadingStateError] = useState('');
     const [readingOwnerFilter, setReadingOwnerFilter] = useState('all');
@@ -2132,25 +2139,28 @@ const StudyApp: React.FC = () => {
         return !!(heading && heading[1].length <= 2);
     };
 
+    const residentLabelById = useMemo(() => new Map(
+        residentCards.map(card => [card.id, card.label || card.id]),
+    ), [residentCards]);
     const readingOwnerLabel = (owner: string) => (
         owner === 'user' ? 'vv'
-            : owner === 'claude-code' ? '克克'
-                : owner === 'gpt' ? 'Milo'
-                    : owner === 'shared' ? '共享'
-                        : owner === 'migration' ? '系统基线'
-                            : owner
+            : owner === 'shared' ? '共享'
+                : owner === 'migration' ? '系统基线'
+                    : residentLabelById.get(owner) || owner
     );
     const readingKindLabel = (kind: ReadingNoteKind) => (
         kind === 'impression' ? '印象' : kind === 'character' ? '人物' : kind === 'thread' ? '伏笔' : '总结'
     );
     const readingOwnerIds = useMemo(() => {
-        const known = ['user', 'claude-code', 'gpt'];
+        const registered = residentCards.map(card => card.id);
+        const known = new Set(['user', ...registered]);
         const extras = Array.from(new Set(readingNotes.map(note => note.owner_id)))
-            .filter(owner => !known.includes(owner) && owner !== 'shared')
+            .filter(owner => !known.has(owner) && owner !== 'shared')
             .sort((a, b) => a.localeCompare(b));
-        if (readingNotes.some(note => note.owner_id === 'shared')) extras.push('shared');
-        return [...known, ...extras];
-    }, [readingNotes]);
+        const owners = ['user', ...registered, ...extras];
+        if (readingNotes.some(note => note.owner_id === 'shared')) owners.push('shared');
+        return owners;
+    }, [readingNotes, residentCards]);
     const filteredReadingNotes = useMemo(() => readingNotes.filter(note => {
         if (readingOwnerFilter !== 'all' && note.owner_id !== readingOwnerFilter) return false;
         if (note.kind !== readingKindFilter || note.status === 'archived') return false;
