@@ -31,7 +31,6 @@ async function morrowRequest(path: string, opts?: RequestInit) {
 export const api = {
   fetchBooks: () => request('/v1/books'),
   fetchBookDetail: (bookId: number, page = 1) =>
-    // 统一坐标制：服务端固定分页（BOOK_PER_PAGE），不再传 per_page
     request(`/v1/books/${bookId}?page=${page}`),
   fetchBookSlice: (bookId: number, start = 0, count = 30) =>
     request(`/v1/books/${bookId}/slice?start=${start}&count=${count}`),
@@ -70,15 +69,24 @@ export const api = {
     request(`/v1/books/${bookId}/bookmark`, { method: 'PUT', body: JSON.stringify(data) }),
   fetchReadingState: (bookId: number) =>
     request(`/v1/books/${bookId}/reading-state`),
+  fetchReadingNotes: (bookId: number) =>
+    request(`/v1/books/${bookId}/notes?limit=500`),
+  fetchReadingNoteRevisions: (bookId: number, noteId: number) =>
+    request(`/v1/books/${bookId}/notes/${noteId}/revisions`),
   upsertReadingNote: (bookId: number, data: any, noteId?: number) =>
     request(`/v1/books/${bookId}/notes${noteId ? `/${noteId}` : ''}`, {
       method: noteId ? 'PUT' : 'POST',
       body: JSON.stringify(data),
     }),
-  resolveReadingThread: (bookId: number, noteId: number, resolution: string, page?: number) =>
+  resolveReadingThread: (bookId: number, noteId: number, resolution: string, page?: number, changeReason?: string) =>
     request(`/v1/books/${bookId}/notes/${noteId}/resolve`, {
       method: 'POST',
-      body: JSON.stringify({ resolution, page }),
+      body: JSON.stringify({ resolution, page, change_reason: changeReason }),
+    }),
+  restoreReadingNoteRevision: (bookId: number, noteId: number, revisionNumber: number, changeReason?: string) =>
+    request(`/v1/books/${bookId}/notes/${noteId}/revisions/${revisionNumber}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ change_reason: changeReason }),
     }),
   deleteReadingNote: (bookId: number, noteId: number) =>
     request(`/v1/books/${bookId}/notes/${noteId}`, { method: 'DELETE' }),

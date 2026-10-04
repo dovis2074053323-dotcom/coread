@@ -58,7 +58,7 @@ interface ReadingNote {
     id: number;
     book_id: number;
     kind: ReadingNoteKind;
-    owner_id: 'shared' | 'user' | 'claude-code' | 'gpt';
+    owner_id: string;
     subject: string | null;
     body: string;
     scope_start_page: number | null;
@@ -68,6 +68,15 @@ interface ReadingNote {
     resolution: string | null;
     created_at: string;
     updated_at: string;
+}
+interface ReadingNoteRevision {
+    id: number;
+    note_id: number;
+    revision_number: number;
+    snapshot: ReadingNote;
+    changed_by: string;
+    change_reason: string;
+    created_at: string;
 }
 interface ReadingState {
     book: { id: number; title: string; total_paragraphs: number };
@@ -503,12 +512,30 @@ const StudyApp: React.FC = () => {
     const [showMoreMenu, setShowMoreMenu] = useState(false);
     const [showReadingState, setShowReadingState] = useState(false);
     const [readingState, setReadingState] = useState<ReadingState | null>(null);
+    const [readingNotes, setReadingNotes] = useState<ReadingNote[]>([]);
     const [readingStateLoading, setReadingStateLoading] = useState(false);
     const [readingStateError, setReadingStateError] = useState('');
+    const [readingOwnerFilter, setReadingOwnerFilter] = useState('all');
+    const [readingKindFilter, setReadingKindFilter] = useState<ReadingNoteKind>('impression');
+    const [readingThreadFilter, setReadingThreadFilter] = useState<'active' | 'resolved'>('active');
+    const [readingNoteMenuId, setReadingNoteMenuId] = useState<number | null>(null);
     const [readingNoteKind, setReadingNoteKind] = useState<ReadingNoteKind>('impression');
     const [readingNoteSubject, setReadingNoteSubject] = useState('');
     const [readingNoteBody, setReadingNoteBody] = useState('');
     const [readingNoteSaving, setReadingNoteSaving] = useState(false);
+    const [editingReadingNote, setEditingReadingNote] = useState<ReadingNote | null>(null);
+    const [editingNoteSubject, setEditingNoteSubject] = useState('');
+    const [editingNoteBody, setEditingNoteBody] = useState('');
+    const [editingNoteResolution, setEditingNoteResolution] = useState('');
+    const [editingNoteAnchor, setEditingNoteAnchor] = useState('');
+    const [editingNoteScopeStart, setEditingNoteScopeStart] = useState('');
+    const [editingNoteScopeEnd, setEditingNoteScopeEnd] = useState('');
+    const [editingNoteReason, setEditingNoteReason] = useState('');
+    const [editingNoteSaving, setEditingNoteSaving] = useState(false);
+    const [revisionNote, setRevisionNote] = useState<ReadingNote | null>(null);
+    const [readingRevisions, setReadingRevisions] = useState<ReadingNoteRevision[]>([]);
+    const [revisionLoading, setRevisionLoading] = useState(false);
+    const [revisionExpanded, setRevisionExpanded] = useState<number | null>(null);
     const [readerBrightness, setReaderBrightness] = useState(() => Math.max(30, Math.min(100, parseInt(localStorage.getItem('coread-brightness') || '100', 10) || 100)));
     const [readerMode, setReaderMode] = useState<ReaderMode>(() => storedChoice('coread-reader-mode', ['paged', 'scroll'] as const, 'paged'));
     const [readerLineSpacing, setReaderLineSpacing] = useState<ReaderLineSpacing>(() => storedChoice('coread-line-spacing', ['tight', 'normal', 'loose'] as const, 'normal'));
@@ -1738,8 +1765,12 @@ const StudyApp: React.FC = () => {
         setReadingStateLoading(true);
         setReadingStateError('');
         try {
-            const result = await api.fetchReadingState(bookId);
-            setReadingState(result.state || null);
+            const [stateResult, notesResult] = await Promise.all([
+                api.fetchReadingState(bookId),
+                api.fetchReadingNotes(bookId),
+            ]);
+            setReadingState(stateResult.state || null);
+            setReadingNotes(Array.isArray(notesResult.notes) ? notesResult.notes : []);
         } catch (e: any) {
             setReadingStateError(e.message || '共读状态加载失败');
         } finally {
@@ -1796,6 +1827,78 @@ const StudyApp: React.FC = () => {
             await loadReadingState(activeBook.id);
         } catch (e: any) {
             setReadingStateError(e.message || '共读笔记删除失败');
+        }
+    };
+
+    const openReadingNoteEditor = (note: ReadingNote) => {
+        if (note.owner_id !== 'user') return;
+        setReadingNoteMenuId(null);
+        setEditingReadingNote(note);
+        setEditingNoteSubject(note.subject || '');
+        setEditingNoteBody(note.body);
+        setEditingNoteResolution(note.resolution || '');
+        setEditingNoteAnchor(note.anchor_page == null ? '' : String(note.anchor_page));
+        setEditingNoteScopeStart(note.scope_start_page == null ? '' : String(note.scope_start_page));
+        setEditingNoteScopeEnd(note.scope_end_page == null ? '' : String(note.scope_end_page));
+        setEditingNoteReason('');
+    };
+
+    const optionalPage = (value: string) => value.trim() ? Number(value) : undefined;
+
+    const saveReadingNoteEdit = async () => {
+        if (!activeBook || !editingReadingNote || editingReadingNote.owner_id !== 'user' || !editingNoteBody.trim() || editingNoteSaving) return;
+        setEditingNoteSaving(true);
+        setReadingStateError('');
+        try {
+            await api.upsertReadingNote(activeBook.id, {
+                kind: editingReadingNote.kind,
+                subject: editingNoteSubject.trim() || undefined,
+                body: editingNoteBody.trim(),
+                anchor_page: optionalPage(editingNoteAnchor),
+                scope_start_page: optionalPage(editingNoteScopeStart),
+                scope_end_page: optionalPage(editingNoteScopeEnd),
+                ...(editingReadingNote.kind === 'thread' && editingReadingNote.status === 'resolved'
+                    ? { resolution: editingNoteResolution.trim() || null }
+                    : {}),
+                change_reason: editingNoteReason.trim() || undefined,
+            }, editingReadingNote.id);
+            setEditingReadingNote(null);
+            await loadReadingState(activeBook.id);
+        } catch (e: any) {
+            setReadingStateError(e.message || '共读笔记修改失败');
+        } finally {
+            setEditingNoteSaving(false);
+        }
+    };
+
+    const openRevisionHistory = async (note: ReadingNote) => {
+        if (!activeBook) return;
+        setReadingNoteMenuId(null);
+        setRevisionNote(note);
+        setReadingRevisions([]);
+        setRevisionExpanded(null);
+        setRevisionLoading(true);
+        try {
+            const result = await api.fetchReadingNoteRevisions(activeBook.id, note.id);
+            setReadingRevisions(Array.isArray(result.revisions) ? result.revisions : []);
+        } catch (e: any) {
+            setReadingStateError(e.message || '修订历史加载失败');
+        } finally {
+            setRevisionLoading(false);
+        }
+    };
+
+    const restoreRevision = async (revision: ReadingNoteRevision) => {
+        if (!activeBook || !revisionNote || revisionNote.owner_id !== 'user') return;
+        if (!window.confirm(`恢复 v${revision.revision_number} 的内容？当前版本不会被删除。`)) return;
+        try {
+            const result = await api.restoreReadingNoteRevision(activeBook.id, revisionNote.id, revision.revision_number);
+            if (result.note) setRevisionNote(result.note);
+            await loadReadingState(activeBook.id);
+            const history = await api.fetchReadingNoteRevisions(activeBook.id, revisionNote.id);
+            setReadingRevisions(Array.isArray(history.revisions) ? history.revisions : []);
+        } catch (e: any) {
+            setReadingStateError(e.message || '恢复修订版本失败');
         }
     };
 
@@ -1982,7 +2085,8 @@ const StudyApp: React.FC = () => {
         const pending = persistCurrentPosition();
         setMode('shelf'); setActiveBook(null); setParagraphs([]); setComments([]);
         setFocusedThreadId(null); setReplyingTo(null); setCommentingIdx(null); setSelRange(null); setFloatingBar(null); setShowToc(false); setTocChapters([]);
-        setShowReadingState(false); setReadingState(null); setReadingStateError('');
+        setShowReadingState(false); setReadingState(null); setReadingNotes([]); setReadingStateError('');
+        setReadingNoteMenuId(null); setEditingReadingNote(null); setRevisionNote(null); setReadingRevisions([]);
         setBookmark(null); setReturnPoint(null);
         Promise.resolve(pending).finally(() => { void loadBooks(false); });
     };
@@ -2028,40 +2132,84 @@ const StudyApp: React.FC = () => {
         return !!(heading && heading[1].length <= 2);
     };
 
-    const readingOwnerLabel = (owner: ReadingNote['owner_id']) => (
-        owner === 'user' ? '我' : owner === 'claude-code' ? aiName : owner === 'gpt' ? 'Milo' : '共读'
+    const readingOwnerLabel = (owner: string) => (
+        owner === 'user' ? 'vv'
+            : owner === 'claude-code' ? '克克'
+                : owner === 'gpt' ? 'Milo'
+                    : owner === 'shared' ? '共享'
+                        : owner === 'migration' ? '系统基线'
+                            : owner
     );
-    const renderReadingNoteSection = (title: string, notes: ReadingNote[], resolved = false) => (
-        <section style={{ marginTop: 18 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: c.primaryDark, marginBottom: 8 }}>{title}</div>
-            {notes.length === 0 ? (
-                <div style={{ fontSize: 12, color: c.muted, padding: '8px 0' }}>暂无</div>
-            ) : notes.map(note => (
-                <article key={note.id} style={{
-                    padding: '11px 12px', marginBottom: 8, borderRadius: 12,
-                    border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.62)',
-                }}>
-                    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, marginBottom: 5 }}>
-                        <strong style={{ fontSize: 12, color: readerNightMode ? READER_INK_NIGHT : READER_INK }}>{note.subject || '未命名'}</strong>
-                        <small style={{ color: c.muted, fontSize: 10 }}>{readingOwnerLabel(note.owner_id)}{note.anchor_page ? ` · p.${note.anchor_page}` : ''}</small>
+    const readingKindLabel = (kind: ReadingNoteKind) => (
+        kind === 'impression' ? '印象' : kind === 'character' ? '人物' : kind === 'thread' ? '伏笔' : '总结'
+    );
+    const readingOwnerIds = useMemo(() => {
+        const known = ['user', 'claude-code', 'gpt'];
+        const extras = Array.from(new Set(readingNotes.map(note => note.owner_id)))
+            .filter(owner => !known.includes(owner) && owner !== 'shared')
+            .sort((a, b) => a.localeCompare(b));
+        if (readingNotes.some(note => note.owner_id === 'shared')) extras.push('shared');
+        return [...known, ...extras];
+    }, [readingNotes]);
+    const filteredReadingNotes = useMemo(() => readingNotes.filter(note => {
+        if (readingOwnerFilter !== 'all' && note.owner_id !== readingOwnerFilter) return false;
+        if (note.kind !== readingKindFilter || note.status === 'archived') return false;
+        if (note.kind === 'thread' && note.status !== readingThreadFilter) return false;
+        return true;
+    }), [readingNotes, readingOwnerFilter, readingKindFilter, readingThreadFilter]);
+
+    const revisionChanges = (current: ReadingNote, previous: ReadingNote | null) => {
+        if (!previous) return [{ label: '版本', before: '—', after: '初始版本' }];
+        const fields: Array<[keyof ReadingNote, string]> = [
+            ['subject', '标题'], ['body', '正文'], ['status', '状态'], ['resolution', '结论'],
+            ['anchor_page', '锚点'], ['scope_start_page', '范围起点'], ['scope_end_page', '范围终点'],
+        ];
+        return fields
+            .filter(([field]) => (current[field] ?? null) !== (previous[field] ?? null))
+            .map(([field, label]) => ({
+                label,
+                before: previous[field] == null || previous[field] === '' ? '—' : String(previous[field]),
+                after: current[field] == null || current[field] === '' ? '—' : String(current[field]),
+            }));
+    };
+
+    const renderReadingNoteCard = (note: ReadingNote) => (
+        <article key={note.id} style={{
+            position: 'relative', padding: '12px 12px 11px', marginBottom: 9, borderRadius: 12,
+            border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.62)',
+        }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 7 }}>
+                <div style={{ minWidth: 0 }}>
+                    <strong style={{ display: 'block', fontSize: 12, color: readerNightMode ? READER_INK_NIGHT : READER_INK }}>{note.subject || '未命名'}</strong>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                        <span style={{ fontSize: 10, fontWeight: 650, color: c.primary, background: `${c.primary}12`, padding: '2px 6px', borderRadius: 999 }}>{readingOwnerLabel(note.owner_id)}</span>
+                        {note.kind === 'thread' && <span style={{ fontSize: 10, color: note.status === 'resolved' ? c.muted : c.primary }}>{note.status === 'resolved' ? '已解' : '待解'}</span>}
+                        {note.anchor_page && <span style={{ fontSize: 10, color: c.muted }}>p.{note.anchor_page}</span>}
                     </div>
-                    <div style={{ fontSize: 12, lineHeight: 1.65, whiteSpace: 'pre-wrap', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>{note.body}</div>
-                    {note.resolution && (
-                        <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${c.primaryBorder}`, fontSize: 12, lineHeight: 1.65, color: c.primary }}>
-                            结论：{note.resolution}
-                        </div>
-                    )}
-                    {note.owner_id === 'user' && (
-                        <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-                            {note.kind === 'thread' && !resolved && (
-                                <button type="button" onClick={() => resolveUserThread(note)} style={{ border: 0, background: 'transparent', color: c.primary, fontSize: 11, padding: 0, cursor: 'pointer' }}>标记已解</button>
-                            )}
-                            <button type="button" onClick={() => deleteUserReadingNote(note)} style={{ border: 0, background: 'transparent', color: c.muted, fontSize: 11, padding: 0, cursor: 'pointer' }}>删除</button>
-                        </div>
-                    )}
-                </article>
-            ))}
-        </section>
+                </div>
+                <button type="button" onClick={() => setReadingNoteMenuId(readingNoteMenuId === note.id ? null : note.id)} aria-label="笔记操作"
+                    style={{ flex: '0 0 auto', width: 30, height: 28, border: 0, background: 'transparent', color: c.muted, fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>···</button>
+            </div>
+            {note.kind === 'thread' && note.status === 'resolved' && <div style={{ fontSize: 10, color: c.muted, marginBottom: 3 }}>当时的猜测 / 问题</div>}
+            <div style={{ fontSize: 12, lineHeight: 1.7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>{note.body}</div>
+            {note.kind === 'thread' && note.status === 'resolved' && (
+                <div style={{ marginTop: 10, paddingTop: 9, borderTop: `1px dashed ${c.primaryBorder}` }}>
+                    <div style={{ fontSize: 10, color: c.muted, marginBottom: 3 }}>后来答案</div>
+                    <div style={{ fontSize: 12, lineHeight: 1.7, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: c.primary }}>{note.resolution || '尚未填写结论'}</div>
+                </div>
+            )}
+            {readingNoteMenuId === note.id && (
+                <div style={{ position: 'absolute', right: 10, top: 36, zIndex: 4, minWidth: 126, padding: 5, borderRadius: 11,
+                    border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? '#2b2924' : '#fff', boxShadow: '0 7px 24px rgba(0,0,0,0.12)' }}>
+                    <button type="button" onClick={() => void openRevisionHistory(note)} style={{ width: '100%', textAlign: 'left', padding: '8px 9px', border: 0, borderRadius: 8, background: 'transparent', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, fontSize: 11, cursor: 'pointer' }}>修订历史</button>
+                    {note.owner_id === 'user' && <>
+                        <button type="button" onClick={() => openReadingNoteEditor(note)} style={{ width: '100%', textAlign: 'left', padding: '8px 9px', border: 0, borderRadius: 8, background: 'transparent', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, fontSize: 11, cursor: 'pointer' }}>{note.kind === 'thread' && note.status === 'resolved' ? '编辑 / 修改结论' : '编辑'}</button>
+                        {note.kind === 'thread' && note.status === 'active' && <button type="button" onClick={() => { setReadingNoteMenuId(null); void resolveUserThread(note); }} style={{ width: '100%', textAlign: 'left', padding: '8px 9px', border: 0, borderRadius: 8, background: 'transparent', color: c.primary, fontSize: 11, cursor: 'pointer' }}>标记已解</button>}
+                        <button type="button" onClick={() => { setReadingNoteMenuId(null); void deleteUserReadingNote(note); }} style={{ width: '100%', textAlign: 'left', padding: '8px 9px', border: 0, borderRadius: 8, background: 'transparent', color: '#b85d52', fontSize: 11, cursor: 'pointer' }}>删除</button>
+                    </>}
+                </div>
+            )}
+        </article>
     );
 
     const renderHighlighted = (text: string, paraIdx: number, highlights: Comment[]) => {
@@ -2908,12 +3056,39 @@ const StudyApp: React.FC = () => {
                                             : '未设置书签'}
                                     </div>
                                 </section>
-                                {renderReadingNoteSection('最近两章', readingState.recent)}
-                                {renderReadingNoteSection('较早章节摘要', readingState.history)}
-                                {renderReadingNoteSection('人物与判断', readingState.characters)}
-                                {renderReadingNoteSection('未解伏笔', readingState.threads.active)}
-                                {renderReadingNoteSection('最近已解伏笔', readingState.threads.recent_resolved, true)}
-                                {renderReadingNoteSection('主观印象', readingState.impressions)}
+                                <div className="no-scrollbar" style={{ display: 'flex', gap: 6, overflowX: 'auto', padding: '14px 0 8px' }}>
+                                    {[{ id: 'all', label: '全部' }, ...readingOwnerIds.map(id => ({ id, label: readingOwnerLabel(id) }))].map(item => (
+                                        <button key={item.id} type="button" onClick={() => setReadingOwnerFilter(item.id)} style={{
+                                            flex: '0 0 auto', border: `1px solid ${readingOwnerFilter === item.id ? c.primary : c.primaryBorder}`,
+                                            background: readingOwnerFilter === item.id ? `${c.primary}14` : 'transparent', color: readingOwnerFilter === item.id ? c.primary : c.muted,
+                                            borderRadius: 999, padding: '6px 11px', fontSize: 11, fontWeight: readingOwnerFilter === item.id ? 650 : 500, cursor: 'pointer', whiteSpace: 'nowrap',
+                                        }}>{item.label}</button>
+                                    ))}
+                                </div>
+                                <div className="no-scrollbar" style={{ display: 'flex', gap: 4, overflowX: 'auto', marginBottom: 8 }}>
+                                    {(['impression', 'character', 'thread', 'summary'] as ReadingNoteKind[]).map(kind => (
+                                        <button key={kind} type="button" onClick={() => setReadingKindFilter(kind)} style={{
+                                            flex: 1, minWidth: 62, border: 0, borderBottom: `2px solid ${readingKindFilter === kind ? c.primary : 'transparent'}`,
+                                            background: 'transparent', color: readingKindFilter === kind ? (readerNightMode ? READER_INK_NIGHT : c.primaryDark) : c.muted,
+                                            padding: '8px 4px 7px', fontSize: 11, fontWeight: readingKindFilter === kind ? 700 : 500, cursor: 'pointer', whiteSpace: 'nowrap',
+                                        }}>{readingKindLabel(kind)}</button>
+                                    ))}
+                                </div>
+                                {readingKindFilter === 'thread' && (
+                                    <div style={{ display: 'flex', gap: 5, marginBottom: 10 }}>
+                                        {(['active', 'resolved'] as const).map(status => (
+                                            <button key={status} type="button" onClick={() => setReadingThreadFilter(status)} style={{
+                                                border: 0, borderRadius: 9, padding: '6px 10px', fontSize: 10, cursor: 'pointer',
+                                                background: readingThreadFilter === status ? `${c.primary}16` : 'transparent', color: readingThreadFilter === status ? c.primary : c.muted,
+                                            }}>{status === 'active' ? '待解' : '已解'}</button>
+                                        ))}
+                                    </div>
+                                )}
+                                <section style={{ marginTop: 4 }}>
+                                    {filteredReadingNotes.length ? filteredReadingNotes.map(renderReadingNoteCard) : (
+                                        <div style={{ fontSize: 12, color: c.muted, padding: '22px 2px', textAlign: 'center' }}>这一栏还没有笔记</div>
+                                    )}
+                                </section>
                             </>
                         )}
 
@@ -2937,6 +3112,88 @@ const StudyApp: React.FC = () => {
                                 {readingNoteSaving ? '保存中…' : '保存到这本书'}
                             </button>
                         </section>
+                    </div>
+                </div>
+            )}
+
+            {showReadingState && editingReadingNote && (
+                <div style={{ position: 'absolute', inset: 0, zIndex: 46, background: 'rgba(0,0,0,0.38)', backdropFilter: 'blur(5px)', padding: 12, display: 'flex', justifyContent: 'center' }}
+                    onClick={() => setEditingReadingNote(null)}>
+                    <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 500, alignSelf: 'center', maxHeight: '88%', overflowY: 'auto', background: readerDisplayBackground, borderRadius: 18, padding: 16, boxShadow: '0 12px 44px rgba(0,0,0,0.2)' }}>
+                        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginBottom: 13 }}>
+                            <div>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: readerNightMode ? READER_INK_NIGHT : c.primaryDark }}>编辑{readingKindLabel(editingReadingNote.kind)}</div>
+                                <div style={{ fontSize: 10, color: c.muted, marginTop: 2 }}>仅修改 vv 自己的笔记</div>
+                            </div>
+                            <button type="button" onClick={() => setEditingReadingNote(null)} style={{ width: 30, height: 30, borderRadius: '50%', border: `1px solid ${c.primaryBorder}`, background: 'transparent', color: c.muted }}>×</button>
+                        </header>
+                        <input value={editingNoteSubject} onChange={e => setEditingNoteSubject(e.target.value)} placeholder="标题"
+                            style={{ width: '100%', boxSizing: 'border-box', padding: '9px 10px', borderRadius: 10, border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? 'rgba(255,255,255,0.05)' : '#fff', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, marginBottom: 8 }} />
+                        <textarea value={editingNoteBody} onChange={e => setEditingNoteBody(e.target.value)} placeholder="正文"
+                            style={{ width: '100%', minHeight: 118, boxSizing: 'border-box', resize: 'vertical', padding: '10px 11px', borderRadius: 10, border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? 'rgba(255,255,255,0.05)' : '#fff', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, fontFamily: READER_SERIF, lineHeight: 1.65, marginBottom: 8 }} />
+                        {editingReadingNote.kind === 'thread' && editingReadingNote.status === 'resolved' && (
+                            <textarea value={editingNoteResolution} onChange={e => setEditingNoteResolution(e.target.value)} placeholder="最终 resolution"
+                                style={{ width: '100%', minHeight: 96, boxSizing: 'border-box', resize: 'vertical', padding: '10px 11px', borderRadius: 10, border: `1px solid ${c.primaryBorder}`, background: readerNightMode ? 'rgba(255,255,255,0.05)' : '#fff', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, fontFamily: READER_SERIF, lineHeight: 1.65, marginBottom: 8 }} />
+                        )}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 8 }}>
+                            <input inputMode="numeric" value={editingNoteAnchor} onChange={e => setEditingNoteAnchor(e.target.value)} placeholder="锚点页" style={{ minWidth: 0, padding: '8px 7px', borderRadius: 9, border: `1px solid ${c.primaryBorder}`, background: 'transparent', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }} />
+                            <input inputMode="numeric" value={editingNoteScopeStart} onChange={e => setEditingNoteScopeStart(e.target.value)} placeholder="范围起" style={{ minWidth: 0, padding: '8px 7px', borderRadius: 9, border: `1px solid ${c.primaryBorder}`, background: 'transparent', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }} />
+                            <input inputMode="numeric" value={editingNoteScopeEnd} onChange={e => setEditingNoteScopeEnd(e.target.value)} placeholder="范围止" style={{ minWidth: 0, padding: '8px 7px', borderRadius: 9, border: `1px solid ${c.primaryBorder}`, background: 'transparent', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }} />
+                        </div>
+                        <input value={editingNoteReason} onChange={e => setEditingNoteReason(e.target.value)} placeholder="修改说明（可选，例如：vv纠正事实）"
+                            style={{ width: '100%', boxSizing: 'border-box', padding: '9px 10px', borderRadius: 10, border: `1px solid ${c.primaryBorder}`, background: 'transparent', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT, marginBottom: 10 }} />
+                        <button type="button" onClick={() => void saveReadingNoteEdit()} disabled={editingNoteSaving || !editingNoteBody.trim()} style={{ width: '100%', border: 0, borderRadius: 11, padding: '10px 0', background: c.primary, color: '#fff', fontWeight: 650, opacity: editingNoteSaving || !editingNoteBody.trim() ? 0.55 : 1 }}>{editingNoteSaving ? '保存中…' : '保存修改'}</button>
+                    </div>
+                </div>
+            )}
+
+            {showReadingState && revisionNote && (
+                <div style={{ position: 'absolute', inset: 0, zIndex: 47, background: 'rgba(0,0,0,0.38)', backdropFilter: 'blur(5px)', padding: 12, display: 'flex', justifyContent: 'center' }}
+                    onClick={() => setRevisionNote(null)}>
+                    <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 520, height: '100%', overflowY: 'auto', background: readerDisplayBackground, borderRadius: 18, padding: '17px 14px 26px', boxShadow: '0 12px 44px rgba(0,0,0,0.2)' }}>
+                        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, marginBottom: 12 }}>
+                            <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: readerNightMode ? READER_INK_NIGHT : c.primaryDark }}>修订历史</div>
+                                <div style={{ fontSize: 10, color: c.muted, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{readingOwnerLabel(revisionNote.owner_id)} · {revisionNote.subject || '未命名'}</div>
+                            </div>
+                            <button type="button" onClick={() => setRevisionNote(null)} style={{ width: 30, height: 30, borderRadius: '50%', border: `1px solid ${c.primaryBorder}`, background: 'transparent', color: c.muted }}>×</button>
+                        </header>
+                        {revisionLoading && <div style={{ fontSize: 12, color: c.muted, padding: '22px 2px' }}>正在读取历史…</div>}
+                        {!revisionLoading && readingRevisions.map(revision => {
+                            const previous = readingRevisions.find(item => item.revision_number === revision.revision_number - 1)?.snapshot || null;
+                            const changes = revisionChanges(revision.snapshot, previous);
+                            const expanded = revisionExpanded === revision.revision_number;
+                            return (
+                                <article key={revision.id} style={{ borderTop: `1px solid ${c.primaryBorder}`, padding: '11px 2px 10px' }}>
+                                    <button type="button" onClick={() => setRevisionExpanded(expanded ? null : revision.revision_number)} style={{ width: '100%', padding: 0, border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer', color: 'inherit' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'baseline' }}>
+                                            <strong style={{ fontSize: 12, color: readerNightMode ? READER_INK_NIGHT : c.primaryDark }}>v{revision.revision_number} · {revision.change_reason}</strong>
+                                            <span style={{ fontSize: 9, color: c.muted }}>{new Date(revision.created_at.replace(' ', 'T') + 'Z').toLocaleString()}</span>
+                                        </div>
+                                        <div style={{ fontSize: 10, color: c.muted, marginTop: 4 }}>{readingOwnerLabel(revision.changed_by)} · {changes.map(change => change.label).join('、') || '内容未变'}</div>
+                                    </button>
+                                    {expanded && <div style={{ marginTop: 10 }}>
+                                        <div style={{ fontSize: 11, lineHeight: 1.65, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: readerNightMode ? READER_INK_NIGHT_SOFT : READER_INK_SOFT }}>
+                                            <div style={{ color: c.muted, fontSize: 10, marginBottom: 3 }}>完整内容</div>
+                                            {revision.snapshot.subject && <div style={{ fontWeight: 650, marginBottom: 5 }}>{revision.snapshot.subject}</div>}
+                                            <div>{revision.snapshot.body}</div>
+                                            {revision.snapshot.resolution && <div style={{ marginTop: 7, color: c.primary }}>结论：{revision.snapshot.resolution}</div>}
+                                        </div>
+                                        <div style={{ marginTop: 11 }}>
+                                            <div style={{ color: c.muted, fontSize: 10, marginBottom: 5 }}>与前一版相比</div>
+                                            {changes.map(change => <div key={change.label} style={{ padding: '7px 8px', marginBottom: 5, borderRadius: 9, background: readerNightMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)', fontSize: 10, lineHeight: 1.55 }}>
+                                                <div style={{ fontWeight: 650, marginBottom: 3 }}>{change.label}</div>
+                                                <div style={{ color: c.muted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>上一版：{change.before}</div>
+                                                <div style={{ marginTop: 2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>这一版：{change.after}</div>
+                                            </div>)}
+                                        </div>
+                                        {revisionNote.owner_id === 'user' && (
+                                            <button type="button" onClick={() => void restoreRevision(revision)} style={{ marginTop: 7, border: `1px solid ${c.primaryBorder}`, borderRadius: 9, padding: '7px 10px', background: 'transparent', color: c.primary, fontSize: 10, cursor: 'pointer' }}>恢复此版</button>
+                                        )}
+                                    </div>}
+                                </article>
+                            );
+                        })}
                     </div>
                 </div>
             )}

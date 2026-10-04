@@ -477,5 +477,120 @@ test('typed reading notes preserve ownership and one-call recovery state', async
   assert.equal(deleted.statusCode, 200);
   const db = getDb(true);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM book_notes WHERE book_id = ?').get(bookId).count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM book_note_revisions WHERE note_id = ?').get(activeThread.body.note.id).count, 0);
   db.close();
+});
+
+
+test('reading-note revisions are append-only, owner-bound, and allow future Resident ids', async () => {
+  initDb(dbPath);
+  process.env.MORROW_COREAD_BRIDGE_SECRET = 'test-coread-bridge';
+  const created = await request('POST', '/v1/books', {
+    title: 'Revision fixture',
+    content: '第一章\n\n一条线索\n\n第二章\n\n答案揭晓',
+  });
+  const bookId = created.body.book_id;
+  const edenHeaders = { 'x-coread-owner': 'opencode', 'x-morrow-coread-token': 'test-coread-bridge' };
+  const gptHeaders = { 'x-coread-owner': 'gpt', 'x-morrow-coread-token': 'test-coread-bridge' };
+
+  const noteCreated = await request('POST', `/v1/books/${bookId}/notes`, {
+    kind: 'thread', subject: '门锁', body: '原猜测：钥匙在屋内。', anchor_page: 1,
+  }, { headers: edenHeaders });
+  assert.equal(noteCreated.statusCode, 201);
+  assert.equal(noteCreated.body.note.owner_id, 'opencode');
+  const noteId = noteCreated.body.note.id;
+
+  let history = await request('GET', `/v1/books/${bookId}/notes/${noteId}/revisions`);
+  assert.deepEqual(history.body.revisions.map(r => r.revision_number), [1]);
+  assert.equal(history.body.revisions[0].snapshot.body, '原猜测：钥匙在屋内。');
+  assert.equal(history.body.revisions[0].changed_by, 'opencode');
+
+  const beforeNoop = noteCreated.body.note.updated_at;
+  const noop = await request('PUT', `/v1/books/${bookId}/notes/${noteId}`, {
+    kind: 'thread', subject: '门锁', body: '原猜测：钥匙在屋内。', anchor_page: 1,
+  }, { headers: edenHeaders });
+  assert.equal(noop.statusCode, 200);
+  assert.equal(noop.body.note.updated_at, beforeNoop);
+  history = await request('GET', `/v1/books/${bookId}/notes/${noteId}/revisions`);
+  assert.equal(history.body.revisions.length, 1);
+
+  const edited = await request('PUT', `/v1/books/${bookId}/notes/${noteId}`, {
+    kind: 'thread', subject: '门锁与钥匙', body: '修正猜测：钥匙由第二个人带入。', anchor_page: 2,
+    change_reason: '修正先前误判',
+  }, { headers: edenHeaders });
+  assert.equal(edited.statusCode, 200);
+  history = await request('GET', `/v1/books/${bookId}/notes/${noteId}/revisions`);
+  assert.deepEqual(history.body.revisions.map(r => r.revision_number), [2, 1]);
+  assert.equal(history.body.revisions[0].change_reason, '修正先前误判');
+
+  const resolved = await request('POST', `/v1/books/${bookId}/notes/${noteId}/resolve`, {
+    resolution: '正文揭晓：钥匙从窗外递入。', page: 4,
+  }, { headers: edenHeaders });
+  assert.equal(resolved.statusCode, 200);
+  assert.equal(resolved.body.note.status, 'resolved');
+  assert.equal(resolved.body.note.body, '修正猜测：钥匙由第二个人带入。');
+
+  const resolutionEdit = await request('POST', `/v1/books/${bookId}/notes/${noteId}/resolve`, {
+    resolution: '正文最终确认：备用钥匙从窗外递入。', page: 4,
+  }, { headers: edenHeaders });
+  assert.equal(resolutionEdit.statusCode, 200);
+  history = await request('GET', `/v1/books/${bookId}/notes/${noteId}/revisions`);
+  assert.deepEqual(history.body.revisions.map(r => r.revision_number), [4, 3, 2, 1]);
+  assert.equal(history.body.revisions[0].change_reason, '更新伏笔结论');
+
+  const wrongOwnerRestore = await request('POST', `/v1/books/${bookId}/notes/${noteId}/revisions/1/restore`, {}, { headers: gptHeaders });
+  assert.equal(wrongOwnerRestore.statusCode, 403);
+
+  const restored = await request('POST', `/v1/books/${bookId}/notes/${noteId}/revisions/1/restore`, {}, { headers: edenHeaders });
+  assert.equal(restored.statusCode, 200);
+  assert.equal(restored.body.note.body, '原猜测：钥匙在屋内。');
+  assert.equal(restored.body.note.status, 'active');
+  assert.equal(restored.body.note.resolution, null);
+  history = await request('GET', `/v1/books/${bookId}/notes/${noteId}/revisions`);
+  assert.deepEqual(history.body.revisions.map(r => r.revision_number), [5, 4, 3, 2, 1]);
+  assert.equal(history.body.revisions[0].change_reason, '恢复至 v1');
+
+  await request('DELETE', `/v1/books/${bookId}`);
+});
+
+test('legacy fixed-owner book_notes migration preserves notes and seeds one baseline revision', () => {
+  const root = mkdtempSync(join(tmpdir(), 'coread-note-owner-migration-'));
+  const legacyPath = join(root, 'coread.db');
+  const legacyDb = new Database(legacyPath);
+  legacyDb.exec(`
+    CREATE TABLE books (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, total_paragraphs INTEGER DEFAULT 0, created_at DATETIME DEFAULT (datetime('now')), cover_image TEXT);
+    INSERT INTO books(id, title, total_paragraphs) VALUES (1, 'Legacy notes', 1);
+    CREATE TABLE book_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      book_id INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('summary', 'character', 'thread', 'impression')),
+      owner_id TEXT NOT NULL DEFAULT 'shared' CHECK (owner_id IN ('shared', 'user', 'claude-code', 'gpt')),
+      subject TEXT,
+      body TEXT NOT NULL,
+      scope_start_page INTEGER,
+      scope_end_page INTEGER,
+      anchor_page INTEGER,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'resolved', 'archived')),
+      resolution TEXT,
+      created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+      updated_at DATETIME NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO book_notes(id, book_id, kind, owner_id, subject, body) VALUES (7, 1, 'impression', 'gpt', '旧笔记', '内容必须原样保留');
+  `);
+  legacyDb.close();
+
+  initDb(legacyPath);
+  const migrated = getDb(true);
+  const schema = migrated.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='book_notes'").get().sql;
+  assert.equal(/CHECK\s*\(owner_id\s+IN/i.test(schema), false);
+  const note = migrated.prepare('SELECT * FROM book_notes WHERE id = 7').get();
+  assert.equal(note.owner_id, 'gpt');
+  assert.equal(note.body, '内容必须原样保留');
+  const revisions = migrated.prepare('SELECT * FROM book_note_revisions WHERE note_id = 7 ORDER BY revision_number').all();
+  assert.equal(revisions.length, 1);
+  assert.equal(revisions[0].revision_number, 1);
+  assert.equal(JSON.parse(revisions[0].snapshot_json).body, '内容必须原样保留');
+  migrated.close();
+  rmSync(root, { recursive: true, force: true });
+  initDb(dbPath);
 });
