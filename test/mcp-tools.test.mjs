@@ -144,10 +144,20 @@ test('reading-state MCP tools bind note ownership to claude-code', () => {
   assert.equal(resolved.note.body, '原猜测：门从里面锁上。');
   assert.equal(resolved.note.resolution, '结论：备用钥匙从窗外递入。');
 
+  const db = getDb();
+  db.prepare(`INSERT INTO book_notes (book_id, kind, owner_id, body, anchor_page, status) VALUES (?, 'thread', 'gpt', ?, 1, 'resolved')`)
+    .run(bookId, 'Milo 私有猜测：不应被 cc 读到。');
+  db.prepare(`INSERT INTO book_notes (book_id, kind, owner_id, body, anchor_page, status) VALUES (?, 'impression', 'gpt', ?, 1, 'active')`)
+    .run(bookId, 'Milo 私有印象：不应被 cc 恢复。');
+  db.close();
+
   const listed = handleTool('list_reading_notes', { book_id: bookId, kind: 'thread', status: 'resolved' });
   assert.equal(listed.notes.length, 1);
+  assert.equal(listed.notes[0].owner_id, 'claude-code');
+  assert.doesNotMatch(JSON.stringify(listed), /Milo 私有猜测/);
   const state = handleTool('get_reading_state', { book_id: bookId });
   assert.equal(state.threads.recent_resolved[0].body, '原猜测：门从里面锁上。');
   assert.equal(state.threads.recent_resolved[0].resolution, '结论：备用钥匙从窗外递入。');
+  assert.doesNotMatch(JSON.stringify(state), /Milo 私有/);
   assert.ok(JSON.stringify(state).length <= state.limits.max_chars);
 });

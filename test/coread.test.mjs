@@ -469,6 +469,12 @@ test('typed reading notes preserve ownership and one-call recovery state', async
   assert.equal(Object.hasOwn(state, 'comments'), false);
   assert.equal(Object.hasOwn(state, 'diary'), false);
 
+  const ccRestored = await request('GET', `/v1/books/${bookId}/reading-state?owner_id=claude-code`);
+  assert.equal(ccRestored.statusCode, 200);
+  assert.equal(ccRestored.body.state.characters[0].body, '表面冷静，但我觉得她在隐瞒害怕。');
+  assert.deepEqual(ccRestored.body.state.impressions, []);
+  assert.doesNotMatch(JSON.stringify(ccRestored.body.state), /我不信任那个证人|猜测脚印来自第二个人/);
+
   const listed = await request('GET', `/v1/books/${bookId}/notes?kind=thread&status=resolved`);
   assert.equal(listed.body.notes.length, 1);
   assert.equal(listed.body.notes[0].id, activeThread.body.note.id);
