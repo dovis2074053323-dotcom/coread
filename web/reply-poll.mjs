@@ -5,6 +5,6 @@ export function unreadReplies(replies, lastSeen, humanName) {
   const human = String(humanName || '').toLowerCase();
   return (Array.isArray(replies) ? replies : []).filter((reply) => (
     Number(reply?.id) > seen
-      && String(reply?.from_who || '').toLowerCase() !== human
+      && !['human', 'vv', human].includes(String(reply?.from_who || '').toLowerCase())
   ));
 }

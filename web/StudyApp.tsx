@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef, startTransition, useLayoutEffect, useMemo } from 'react';
 import { api, coreadPath } from './api';
 import { unreadReplies } from './reply-poll.mjs';
+import { humanDisplayName, formatCommentTime } from './comment-display.mjs';
 import { findBookById } from './open-book.js';
 import { readerPageFragments, stripReaderHeading, threadBelongsToFragment, virtualPageRange } from './reader-layout.js';
 
@@ -509,7 +510,7 @@ const StudyApp: React.FC = () => {
     const [savingEdit, setSavingEdit] = useState(false);
     const batchFileRef = useRef<HTMLInputElement>(null);
     const [showBar, setShowBar] = useState(false);
-    const [humanName, setHumanName] = useState(() => localStorage.getItem('coread-human-name') || 'human');
+    const [humanName, setHumanName] = useState(() => humanDisplayName(localStorage.getItem('coread-human-name')));
     const [aiName, setAiName] = useState(() => localStorage.getItem('coread-ai-name') || 'AI');
     const [showSettings, setShowSettings] = useState(false);
     const [readerFontSize, setReaderFontSize] = useState(() => parseInt(localStorage.getItem('coread-font-size') || '14', 10));
@@ -561,7 +562,7 @@ const StudyApp: React.FC = () => {
     const readerHorizontalPadding = readerSidePadding * 2;
     const displayName = (from: string) => {
         const lower = from.toLowerCase();
-        if (lower === 'human' || lower === humanName.toLowerCase()) return humanName;
+        if (lower === 'human' || lower === 'vv' || lower === humanName.toLowerCase()) return humanName;
         if (lower === 'ai' || lower === aiName.toLowerCase()) return aiName;
         return from;
     };
@@ -2309,7 +2310,7 @@ const StudyApp: React.FC = () => {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
                         <span style={{ width: 6, height: 6, borderRadius: '50%', background: rail, flexShrink: 0 }} />
                         <span style={{ fontSize: 11, fontWeight: 700, color: rail, letterSpacing: 0.2 }}>{displayName(cmt.from_who)}</span>
-                        <span style={{ fontSize: 10, color: c.muted }}>{cmt.created_at?.slice(5, 16).replace('T', ' ')}</span>
+                        <span style={{ fontSize: 10, color: c.muted }}>{formatCommentTime(cmt.created_at)}</span>
                     </div>
                     {depth === 0 && cmt.selected_text && (
                         <div style={{ fontSize: 11, color: c.muted, lineHeight: 1.5, margin: '2px 0 5px', paddingLeft: 8, borderLeft: `2px solid ${rail}55` }}>
