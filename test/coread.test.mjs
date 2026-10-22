@@ -385,6 +385,49 @@ test('edit book: rename keeps annotations; content replace re-anchors by text', 
 });
 
 
+test('cc chapters append without replacing text, annotations or reading position; other books stay protected', async () => {
+  initDb(dbPath);
+  process.env.MORROW_COREAD_BRIDGE_SECRET = 'test-coread-bridge';
+  const auth = { headers: { 'x-coread-owner': 'claude-code', 'x-morrow-coread-token': 'test-coread-bridge' } };
+  const created = await request('POST', '/v1/books', {
+    title: 'cc 的长篇', content: '# 序章\n\n最初的一句。\n\n下一段。'
+  }, auth);
+  assert.equal(created.statusCode, 201);
+  const id = created.body.book_id;
+  const shelf = await request('GET', '/v1/books');
+  assert.equal(shelf.body.books.find(book => book.id === id).owner_id, 'claude-code');
+  const before = await request('GET', `/v1/books/${id}/raw`);
+  const annotation = await request('POST', `/v1/books/${id}/comment`, {
+    paragraph_idx: 1, content: '保留的页边批注', from_who: 'human'
+  });
+  assert.equal(annotation.statusCode, 200);
+  await request('PATCH', `/v1/books/${id}/progress`, { page: 1, char_offset: 2 });
+  const chapter = { title: '第一章', content: '今天写一句。\n\n明天再续。' };
+  const forged = await request('POST', `/v1/books/${id}/chapters`, chapter, {
+    headers: { 'x-coread-owner': 'claude-code', 'x-morrow-coread-token': 'invalid' },
+  });
+  assert.equal(forged.statusCode, 403);
+  const appended = await request('POST', `/v1/books/${id}/chapters`, chapter, auth);
+  assert.equal(appended.statusCode, 200);
+  assert.equal(appended.body.book_id, id);
+  assert.ok(appended.body.appended_paragraphs >= 2);
+  const after = await request('GET', `/v1/books/${id}/raw`);
+  assert.ok(after.body.content.startsWith(before.body.content));
+  assert.match(after.body.content, /第一章/);
+  assert.match(after.body.content, /明天再续/);
+  const detail = await request('GET', `/v1/books/${id}?page=1`);
+  assert.ok(detail.body.comments.some(x => x.id === annotation.body.id));
+  assert.equal(detail.body.progress_position.paragraph_idx, 1);
+  const toc = await request('GET', `/v1/books/${id}/toc`);
+  assert.ok(toc.body.chapters.some(x => x.title === '第一章'));
+
+  const human = await request('POST', '/v1/books', { title: 'vv 的书', content: '她的正文。' });
+  const denied = await request('POST', `/v1/books/${human.body.book_id}/chapters`, chapter, auth);
+  assert.equal(denied.statusCode, 403);
+  const missing = await request('POST', '/v1/books/999999/chapters', chapter, auth);
+  assert.equal(missing.statusCode, 404);
+});
+
 test('typed reading notes preserve ownership and one-call recovery state', async () => {
   initDb(dbPath);
   process.env.MORROW_COREAD_BRIDGE_SECRET = 'test-coread-bridge';
