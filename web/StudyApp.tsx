@@ -54,6 +54,7 @@ interface Book {
 interface Paragraph { idx: number; content: string; }
 interface Comment { id: number; book_id: number; paragraph_idx: number; sel_end_para_idx: number | null; sel_start_idx: number | null; sel_end_idx: number | null; selected_text: string | null; from_who: string; content: string; created_at: string; reply_to: number | null; }
 interface Bookmark { page: number; paragraph_idx: number; char_offset: number; created_at?: string | null; updated_at?: string | null; }
+interface ServerStatus { restartable: boolean; started_at?: string; code_updated_at?: string; stale?: boolean; }
 type ReadingNoteKind = 'summary' | 'character' | 'thread' | 'impression';
 interface ReadingNote {
     id: number;
@@ -513,6 +514,8 @@ const StudyApp: React.FC = () => {
     const [humanName, setHumanName] = useState(() => humanDisplayName(localStorage.getItem('coread-human-name')));
     const [aiName, setAiName] = useState(() => localStorage.getItem('coread-ai-name') || 'AI');
     const [showSettings, setShowSettings] = useState(false);
+    const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+    const [restartingServer, setRestartingServer] = useState(false);
     const [readerFontSize, setReaderFontSize] = useState(() => parseInt(localStorage.getItem('coread-font-size') || '14', 10));
     const [showFontPanel, setShowFontPanel] = useState(false);
     const [showBookmarkMenu, setShowBookmarkMenu] = useState(false);
@@ -1697,6 +1700,35 @@ const StudyApp: React.FC = () => {
             charOffset: start.offset,
         };
         return derived.paragraphIdx === null ? currentPositionRef.current : derived;
+    };
+
+    useEffect(() => {
+        if (!showSettings) return;
+        api.fetchServerStatus().then(setServerStatus).catch(() => setServerStatus(null));
+    }, [showSettings]);
+
+    const restartServer = async () => {
+        if (restartingServer || !confirm('重启共读室服务？大约十秒，期间页面会暂时连不上。')) return;
+        setRestartingServer(true);
+        try {
+            const { started_at: before } = await api.restartServer();
+            // 旧进程退出到 systemd 拉起新进程之间（RestartSec=5）请求会失败，照常继续等
+            const deadline = Date.now() + 45_000;
+            while (Date.now() < deadline) {
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                const status: ServerStatus | null = await api.fetchServerStatus().catch(() => null);
+                if (status?.started_at && status.started_at !== before) {
+                    setServerStatus(status);
+                    toast('共读室已重启');
+                    return;
+                }
+            }
+            toast('还没等到服务回来，稍后刷新看看');
+        } catch (e: any) {
+            toast(`重启失败: ${e.message}`);
+        } finally {
+            setRestartingServer(false);
+        }
     };
 
     const saveBookmark = async () => {
@@ -3224,6 +3256,20 @@ const StudyApp: React.FC = () => {
                             <span style={{ fontSize: 12, color: '#aaa' }}>大</span>
                             <span style={{ fontSize: 12, color: c.primary, fontWeight: 600, minWidth: 28, textAlign: 'center' }}>{readerFontSize}px</span>
                         </div>
+                        {serverStatus?.restartable && (
+                            <div style={{ marginBottom: 20 }}>
+                                <label style={{ fontSize: 12, color: '#888', display: 'block', marginBottom: 6 }}>服务 Server</label>
+                                <div style={{ fontSize: 12, color: serverStatus.stale ? '#c2410c' : '#aaa', marginBottom: 8, lineHeight: 1.5 }}>
+                                    {serverStatus.stale
+                                        ? '后端代码有更新，重启后才会生效'
+                                        : `运行中 · 启动于 ${new Date(serverStatus.started_at!).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`}
+                                </div>
+                                <button onClick={restartServer} disabled={restartingServer}
+                                    style={{ width: '100%', padding: '9px 0', borderRadius: 14, background: 'white', border: `1px solid ${serverStatus.stale ? '#fdba74' : c.primaryBorder}`, color: serverStatus.stale ? '#c2410c' : c.primaryDark, fontSize: 13, fontWeight: 600, cursor: restartingServer ? 'default' : 'pointer', opacity: restartingServer ? 0.6 : 1 }}>
+                                    {restartingServer ? '重启中…' : '重启共读室服务'}
+                                </button>
+                            </div>
+                        )}
                         <button onClick={() => setShowSettings(false)} style={{ width: '100%', padding: '10px 0', borderRadius: 14, background: c.primary, border: 'none', color: 'white', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>完成</button>
                     </div>
                 </div>

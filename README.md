@@ -91,6 +91,7 @@ Streamable HTTP端点：`http://你的服务器:3001/mcp`
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `COREAD_PORT` | `3000` | Web服务器端口 |
+| `COREAD_HOST` | `127.0.0.1` | 监听地址；只本机可访问，要对外开放才设成 `0.0.0.0` |
 | `COREAD_MCP_PORT` | `3001` | MCP SSE/HTTP服务器端口 |
 | `COREAD_DB` | `./data/coread.db` | 数据库路径 |
 | `COREAD_NOTIFY_CMD` | 空（关闭） | 有人评论时执行的shell命令，见下方「评论通知」 |

@@ -643,3 +643,31 @@ test('legacy fixed-owner book_notes migration preserves notes and seeds one base
   rmSync(root, { recursive: true, force: true });
   initDb(dbPath);
 });
+
+test('reports stale backend code and restarts only under a supervisor', async () => {
+  const startedAt = new Date('2026-10-08T04:51:06Z');
+  let restarts = 0;
+  const server = (supervised, codeUpdatedAt) => ({
+    startedAt, supervised, codeUpdatedAt: () => codeUpdatedAt, restart: () => { restarts += 1; },
+  });
+
+  const bare = await request('GET', '/v1/server');
+  assert.deepEqual(bare.body, { restartable: false });
+
+  const stale = await request('GET', '/v1/server', undefined, { server: server(true, new Date('2026-10-22T04:32:18Z')) });
+  assert.equal(stale.body.restartable, true);
+  assert.equal(stale.body.stale, true);
+  assert.equal(stale.body.started_at, startedAt.toISOString());
+
+  const fresh = await request('GET', '/v1/server', undefined, { server: server(true, new Date('2026-10-01T00:00:00Z')) });
+  assert.equal(fresh.body.stale, false);
+
+  const unsupervised = await request('POST', '/v1/server/restart', undefined, { server: server(false, startedAt) });
+  assert.equal(unsupervised.statusCode, 409);
+  assert.equal(restarts, 0);
+
+  const restarted = await request('POST', '/v1/server/restart', undefined, { server: server(true, startedAt) });
+  assert.equal(restarted.statusCode, 202);
+  assert.equal(restarted.body.started_at, startedAt.toISOString());
+  assert.equal(restarts, 1);
+});

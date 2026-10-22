@@ -61,6 +61,8 @@ export const api = {
   imageUrl: (bookId: number, filename: string) =>
     `${BASE}${coreadPath(`/v1/book-images/${bookId}/${filename}`)}`,
   wishlistUrl: () => `${BASE}/v1/reading-wishlist`,
+  fetchServerStatus: () => request('/v1/server'),
+  restartServer: () => request('/v1/server/restart', { method: 'POST' }),
   fetchSettings: () => request('/v1/settings'),
   updateSettings: (data: { context_chars: number }) =>
     request('/v1/settings', { method: 'PUT', body: JSON.stringify(data) }),

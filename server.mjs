@@ -10,6 +10,9 @@ import { postAnnotationEvent, bridgeConfigured } from './lib/bridge.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.COREAD_PORT || '3000');
+// 只对本机开放：外面一律走 Morrow 的 /coread 代理（带登录和同源校验），
+// 直接暴露 3000 等于绕过登录就能删书、重启。
+const HOST = process.env.COREAD_HOST || '127.0.0.1';
 const DB_PATH = process.env.COREAD_DB || path.join(process.cwd(), 'data', 'coread.db');
 
 // Optional comment notifier: run an arbitrary command whenever someone comments.
@@ -87,12 +90,42 @@ function withGzip(req, res) {
   return res;
 }
 
+// 手动重启：server.mjs 和 lib/ 只在进程启动时加载一次（public/ 是现读的），
+// 改了后端不重启，新路由就会掉进下面的 index.html 兜底、回一个 200 的网页。
+// 只有被 systemd 托管（Restart=always 会设 INVOCATION_ID）时退出才等于重启；
+// 裸跑时退出就是关机，所以那种情况不提供重启。
+const STARTED_AT = new Date();
+const SUPERVISED = Boolean(process.env.INVOCATION_ID);
+
+function codeUpdatedAt() {
+  const files = [path.join(__dirname, 'server.mjs')];
+  const libDir = path.join(__dirname, 'lib');
+  for (const name of fs.readdirSync(libDir)) if (name.endsWith('.mjs')) files.push(path.join(libDir, name));
+  return new Date(Math.max(...files.map(f => fs.statSync(f).mtimeMs)));
+}
+
+const serverControl = {
+  startedAt: STARTED_AT,
+  supervised: SUPERVISED,
+  codeUpdatedAt,
+  restart() {
+    console.log('  ↻ manual restart requested');
+    // 先让这次请求的响应发出去，再收尾；空闲长连接直接断，卡住的请求最多等 3 秒。
+    setTimeout(() => {
+      server.close(() => process.exit(0));
+      server.closeIdleConnections();
+      setTimeout(() => process.exit(0), 3000).unref();
+    }, 200);
+  },
+};
+
 const server = http.createServer(async (req, res) => {
   res = withGzip(req, res);
   const handled = await handleRequest(req, res, {
     port: PORT,
     onComment: notifyComment,
     onAnnotationEvent: bridgeConfigured() ? postAnnotationEvent : null,
+    server: serverControl,
   });
   if (handled) return;
 
@@ -117,7 +150,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`\n  📚 coread server running at http://localhost:${PORT}`);
   console.log(`  📂 Database: ${DB_PATH}`);
   console.log(`  🌐 Open http://localhost:${PORT} in your browser\n`);
