@@ -1,5 +1,7 @@
 name: Temporary Coread chapter validation
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [feat/cc-append-chapter-20261022]
   workflow_dispatch:
