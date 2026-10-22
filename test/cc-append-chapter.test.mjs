@@ -44,7 +44,7 @@ test('cc chapters append to their own book without changing existing pages or an
 
     const appended = await request(`/v1/books/${id}/chapters`, {
       title: '醒来的第二章',
-      content: '写下第一段。\\n\\n写下第二段。',
+      content: '写下第一段。\n\n写下第二段。',
     });
     assert.equal(appended.status, 201);
     assert.equal(appended.body.ok, true);
